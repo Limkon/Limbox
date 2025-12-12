@@ -963,27 +963,51 @@ void init_openssl_global() {
         log_msg("[Security] Standard OpenSSL Cipher Suites");
     }
 
-    wchar_t pemPath[MAX_PATH];
-    GetModuleFileNameW(NULL, pemPath, MAX_PATH);
-    wchar_t* p = wcsrchr(pemPath, L'\\'); 
-    if (p) { *p = 0; wcscat(pemPath, L"\\cacert.pem"); }
-    else wcscpy(pemPath, L"cacert.pem");
-    char pemPathA[MAX_PATH];
-    WideCharToMultiByte(CP_ACP, 0, pemPath, -1, pemPathA, MAX_PATH, NULL, NULL);
-    FILE* f = fopen(pemPathA, "rb");
-    if (f) {
-        fclose(f);
-        if (SSL_CTX_load_verify_locations(g_ssl_ctx, pemPathA, NULL)) {
-            SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_PEER, NULL);
-            log_msg("[Security] CA loaded, strict mode.");
+    // --- 修改开始: 从资源加载证书 ---
+    // 资源 ID 为 2，类型为 RT_RCDATA
+    HRSRC hRes = FindResourceW(NULL, MAKEINTRESOURCEW(2), RT_RCDATA);
+    if (hRes) {
+        HGLOBAL hData = LoadResource(NULL, hRes);
+        void* pData = LockResource(hData);
+        DWORD dataSize = SizeofResource(NULL, hRes);
+
+        if (pData && dataSize > 0) {
+            // 创建内存 BIO
+            BIO *cbio = BIO_new_mem_buf(pData, dataSize);
+            if (cbio) {
+                X509_STORE *cts = SSL_CTX_get_cert_store(g_ssl_ctx);
+                X509 *x = NULL;
+                int count = 0;
+                // 循环读取 PEM 数据中的所有证书
+                while ((x = PEM_read_bio_X509(cbio, NULL, 0, NULL)) != NULL) {
+                    if (X509_STORE_add_cert(cts, x)) {
+                        count++;
+                    }
+                    X509_free(x);
+                }
+                BIO_free(cbio);
+
+                if (count > 0) {
+                    SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_PEER, NULL);
+                    log_msg("[Security] Embedded CA loaded (%d certs). Strict mode.", count);
+                } else {
+                    SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_NONE, NULL);
+                    log_msg("[Warning] Embedded CA data invalid. Insecure mode.");
+                }
+            } else {
+                SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_NONE, NULL);
+                log_msg("[Warning] Failed to create BIO for CA. Insecure mode.");
+            }
         } else {
             SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_NONE, NULL);
-            log_msg("[Security] CA load failed, insecure mode.");
+            log_msg("[Warning] Empty CA resource. Insecure mode.");
         }
     } else {
+        // 如果找不到资源，回退到不验证模式
         SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_NONE, NULL);
-        log_msg("[Warning] cacert.pem not found. Insecure mode.");
+        log_msg("[Warning] cacert.pem resource not found in exe. Insecure mode.");
     }
+    // --- 修改结束 ---
 }
 
 int tls_init_connect(TLSContext *ctx) {
