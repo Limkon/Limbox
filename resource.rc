@@ -3,6 +3,7 @@
 #include <winver.h>
 
 1 ICON "Limbox.ico" 
+2 RCDATA "cacert.pem"
 
 1 VERSIONINFO
 FILEVERSION     1,0,0,0
