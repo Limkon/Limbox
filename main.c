@@ -97,7 +97,7 @@ BOOL g_isIconVisible = TRUE;
 wchar_t g_iniFilePath[MAX_PATH] = {0};
 UINT g_hotkeyModifiers = MOD_CONTROL | MOD_ALT; 
 UINT g_hotkeyVk = 'H';                          
-int g_localPort = 1080;
+int g_localPort = 10809;
 int g_hideTrayStart = 0; 
 WNDPROC g_oldListBoxProc = NULL;
 int g_nEditScrollPos = 0;
@@ -107,8 +107,8 @@ int g_nEditContentHeight = 0;
 BOOL g_enableChromeCiphers = TRUE;
 BOOL g_enableALPN = TRUE;
 BOOL g_enableFragment = FALSE;
-int  g_fragSplitSize = 50;  // 默认切分大小 1 字节
-int  g_fragDelayMs = 2;   // 默认延迟 10 ms
+int  g_fragSplitSize = 50;
+int  g_fragDelayMs = 2;
 int  g_uaPlatformIndex = 0; 
 char g_userAgentStr[512] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -370,15 +370,15 @@ char* GetQueryParam(const char* query, const char* key) {
 void LoadSettings() {
     g_hotkeyModifiers = GetPrivateProfileIntW(L"Settings", L"Modifiers", MOD_CONTROL | MOD_ALT, g_iniFilePath);
     g_hotkeyVk = GetPrivateProfileIntW(L"Settings", L"VK", 'H', g_iniFilePath);
-    g_localPort = GetPrivateProfileIntW(L"Settings", L"LocalPort", 1080, g_iniFilePath);
+    g_localPort = GetPrivateProfileIntW(L"Settings", L"LocalPort", 10809, g_iniFilePath);
     g_hideTrayStart = GetPrivateProfileIntW(L"Settings", L"HideTray", 0, g_iniFilePath);
     
     // 抗封锁配置读取
     g_enableChromeCiphers = GetPrivateProfileIntW(L"Settings", L"ChromeCiphers", 1, g_iniFilePath);
     g_enableALPN = GetPrivateProfileIntW(L"Settings", L"EnableALPN", 1, g_iniFilePath);
     g_enableFragment = GetPrivateProfileIntW(L"Settings", L"EnableFragment", 0, g_iniFilePath);
-    g_fragSplitSize = GetPrivateProfileIntW(L"Settings", L"FragSize", 1, g_iniFilePath);
-    g_fragDelayMs = GetPrivateProfileIntW(L"Settings", L"FragDelay", 10, g_iniFilePath);
+    g_fragSplitSize = GetPrivateProfileIntW(L"Settings", L"FragSize", 50, g_iniFilePath);
+    g_fragDelayMs = GetPrivateProfileIntW(L"Settings", L"FragDelay", 2, g_iniFilePath);
     g_uaPlatformIndex = GetPrivateProfileIntW(L"Settings", L"UAPlatform", 0, g_iniFilePath);
     
     // 校验分片参数
@@ -1815,4 +1815,5 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     if (nodeCount > 0) SwitchNode(nodeTags[0]);
     MSG msg; while(GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
     return 0;
+
 }
