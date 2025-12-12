@@ -26,6 +26,8 @@
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include "cJSON.c" 
+#include <openssl/x509.h>
+#include <openssl/pem.h>
 
 const wchar_t* REG_PATH_PROXY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
 
@@ -1817,4 +1819,5 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     return 0;
 
 }
+
 
