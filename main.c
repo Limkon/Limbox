@@ -1,6 +1,3 @@
-// =================================================================================
-//  Windows 7 Ultimate Proxy Client - Hidden Tray Persistence
-// =================================================================================
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -24,9 +21,12 @@
 #include <wchar.h>
 #include <time.h>
 #include <ctype.h>
+#include <wininet.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include "cJSON.c" 
+
+const wchar_t* REG_PATH_PROXY = L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
 
 typedef struct { SOCKET sock; SSL *ssl; } TLSContext;
 typedef struct {
@@ -39,6 +39,7 @@ typedef struct {
 #define WM_REFRESH_NODELIST (WM_USER + 50)
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_AUTORUN 1002
+#define ID_TRAY_SYSTEM_PROXY 1003
 #define ID_TRAY_MANAGE_NODES 1006
 #define ID_TRAY_SHOW_CONSOLE 1007
 #define ID_TRAY_IMPORT_CLIPBOARD 1008
@@ -52,7 +53,6 @@ typedef struct {
 #define ID_NODEMGR_EDIT 3003 
 #define ID_HOTKEY_CTRL 7001 
 #define ID_PORT_EDIT 7002
-
 #define ID_EDIT_TAG      8001
 #define ID_EDIT_ADDR     8002
 #define ID_EDIT_PORT     8003
@@ -87,7 +87,7 @@ wchar_t g_iniFilePath[MAX_PATH] = {0};
 UINT g_hotkeyModifiers = MOD_CONTROL | MOD_ALT; 
 UINT g_hotkeyVk = 'H';                          
 int g_localPort = 1080;
-int g_hideTrayStart = 0; // 新增：保存托盘隐藏状态 (0=显示, 1=隐藏)
+int g_hideTrayStart = 0; 
 WNDPROC g_oldListBoxProc = NULL;
 int g_nEditScrollPos = 0;
 int g_nEditContentHeight = 0;
@@ -138,6 +138,9 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK LogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+BOOL IsWindows8OrGreater();
+void SetSystemProxy(BOOL enable);
+BOOL IsSystemProxyEnabled();
 
 void log_msg(const char *format, ...) {
     char buf[2048]; char time_buf[64]; SYSTEMTIME st; GetLocalTime(&st);
@@ -258,7 +261,6 @@ void LoadSettings() {
     g_hotkeyModifiers = GetPrivateProfileIntW(L"Settings", L"Modifiers", MOD_CONTROL | MOD_ALT, g_iniFilePath);
     g_hotkeyVk = GetPrivateProfileIntW(L"Settings", L"VK", 'H', g_iniFilePath);
     g_localPort = GetPrivateProfileIntW(L"Settings", L"LocalPort", 1080, g_iniFilePath);
-    // 加载托盘隐藏状态，默认为0 (显示)
     g_hideTrayStart = GetPrivateProfileIntW(L"Settings", L"HideTray", 0, g_iniFilePath);
 }
 
@@ -270,7 +272,6 @@ void SaveSettings() {
     WritePrivateProfileStringW(L"Settings", L"VK", buffer, g_iniFilePath);
     wsprintfW(buffer, L"%d", g_localPort);
     WritePrivateProfileStringW(L"Settings", L"LocalPort", buffer, g_iniFilePath);
-    // 保存托盘隐藏状态
     wsprintfW(buffer, L"%d", g_hideTrayStart);
     WritePrivateProfileStringW(L"Settings", L"HideTray", buffer, g_iniFilePath);
 }
@@ -771,15 +772,15 @@ void ToggleTrayIcon() {
     if (g_isIconVisible) { 
         Shell_NotifyIconW(NIM_DELETE, &nid); 
         g_isIconVisible = FALSE; 
-        g_hideTrayStart = 1; // 标记为隐藏
+        g_hideTrayStart = 1;
     }
     else { 
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         Shell_NotifyIconW(NIM_ADD, &nid); 
         g_isIconVisible = TRUE; 
-        g_hideTrayStart = 0; // 标记为显示
+        g_hideTrayStart = 0;
     }
-    SaveSettings(); // 立即保存状态
+    SaveSettings();
 }
 
 void init_openssl_global() {
@@ -1197,72 +1198,54 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_CREATE: {
             int x = 25, w_lbl = 110, w_edit = 300, h = 24, gap = 40; 
             int y = 20;
-
             #define CREATE_LABEL(txt) CreateWindowW(L"STATIC", txt, WS_CHILD|WS_VISIBLE, x, y, w_lbl, h, hWnd, NULL, NULL, NULL)
             #define CREATE_EDIT(id, styles) CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|styles, x+w_lbl, y-2, w_edit, h+4, hWnd, (HMENU)id, NULL, NULL)
             #define CREATE_COMBO(id) CreateWindowW(L"COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, x+w_lbl, y-2, 140, 200, hWnd, (HMENU)id, NULL, NULL)
-
             CREATE_LABEL(L"别名 (Tag):");
             CREATE_EDIT(ID_EDIT_TAG, ES_AUTOHSCROLL);
             y += gap;
-
             CREATE_LABEL(L"地址 (Address):");
             CREATE_EDIT(ID_EDIT_ADDR, ES_AUTOHSCROLL);
             y += gap;
-
             CREATE_LABEL(L"端口 (Port):");
             CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER, x+w_lbl, y-2, 80, h+4, hWnd, (HMENU)ID_EDIT_PORT, NULL, NULL);
             y += gap + 10;
-
             CreateWindowW(L"STATIC", L"用户验证 (Auth)", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
             y += 25;
-
-            CREATE_LABEL(L"用户 (User/UUID):");
+            CREATE_LABEL(L"User/UUID:");
             CREATE_EDIT(ID_EDIT_USER, ES_AUTOHSCROLL);
             y += gap;
-
             CREATE_LABEL(L"密码 (Pass):");
             CREATE_EDIT(ID_EDIT_PASS, ES_AUTOHSCROLL);
             y += gap + 10;
-
             CreateWindowW(L"STATIC", L"底层传输 (Transport)", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
             y += 25;
-
             CREATE_LABEL(L"传输协议:");
             HWND hNet = CREATE_COMBO(ID_EDIT_NET);
             AddComboItem(hNet, L"tcp", TRUE); AddComboItem(hNet, L"ws", FALSE);
             y += gap;
-
             CREATE_LABEL(L"伪装类型:");
             HWND hType = CREATE_COMBO(ID_EDIT_TYPE);
             AddComboItem(hType, L"none", TRUE);
             y += gap;
-
             CREATE_LABEL(L"伪装域名 (Host):");
             CREATE_EDIT(ID_EDIT_HOST, ES_AUTOHSCROLL);
             y += gap;
-
             CREATE_LABEL(L"路径 (Path):");
             CREATE_EDIT(ID_EDIT_PATH, ES_AUTOHSCROLL);
             y += gap;
-
             CREATE_LABEL(L"传输安全 (TLS):");
             HWND hTls = CREATE_COMBO(ID_EDIT_TLS);
             AddComboItem(hTls, L"none", TRUE); AddComboItem(hTls, L"tls", FALSE);
             y += gap + 30;
-
             CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 120, y, 100, 32, hWnd, (HMENU)IDOK, NULL, NULL);
             CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 260, y, 100, 32, hWnd, (HMENU)IDCANCEL, NULL, NULL);
-            
             y += 80; 
             g_nEditContentHeight = y; 
             g_nEditScrollPos = 0;
-
             EnumChildWindows(hWnd, (WNDENUMPROC)(void*)SendMessageW, (LPARAM)hAppFont);
             if (hAppFont) SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
-
             LoadNodeToEdit(hWnd, g_editingTag);
-            
             SCROLLINFO si;
             si.cbSize = sizeof(si);
             si.fMask = SIF_RANGE | SIF_PAGE;
@@ -1272,7 +1255,6 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
             break;
         }
-
         case WM_SIZE: {
             RECT rc; GetClientRect(hWnd, &rc);
             int clientHeight = rc.bottom - rc.top;
@@ -1286,7 +1268,6 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
             break;
         }
-
         case WM_VSCROLL: {
             SCROLLINFO si;
             si.cbSize = sizeof(si);
@@ -1294,7 +1275,6 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             GetScrollInfo(hWnd, SB_VERT, &si);
             int oldPos = si.nPos;
             int newPos = oldPos;
-
             switch (LOWORD(wParam)) {
                 case SB_TOP: newPos = si.nMin; break;
                 case SB_BOTTOM: newPos = si.nMax; break;
@@ -1304,10 +1284,8 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 case SB_PAGEDOWN: newPos += si.nPage; break;
                 case SB_THUMBTRACK: newPos = si.nTrackPos; break;
             }
-
             if (newPos < 0) newPos = 0;
             if (newPos > (int)(si.nMax - si.nPage + 1)) newPos = si.nMax - si.nPage + 1;
-            
             if (newPos != oldPos) {
                 ScrollWindow(hWnd, 0, oldPos - newPos, NULL, NULL);
                 si.fMask = SIF_POS;
@@ -1318,7 +1296,6 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
             break;
         }
-
         case WM_MOUSEWHEEL: {
             int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
             int scrollLines = 3; 
@@ -1328,7 +1305,6 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
             break;
         }
-
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK) {
                 SaveEditedNode(hWnd);
@@ -1386,6 +1362,100 @@ void OpenLogViewer(BOOL bShow) {
     if (bShow) ShowWindow(hLogViewerWnd, SW_SHOW); else ShowWindow(hLogViewerWnd, SW_HIDE);
 }
 
+BOOL IsWindows8OrGreater() {
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (hKernel32 == NULL) return FALSE;
+    FARPROC pFunc = GetProcAddress(hKernel32, "SetProcessMitigationPolicy");
+    return (pFunc != NULL);
+}
+
+void SetSystemProxy(BOOL enable) {
+    if (g_localPort <= 0 && enable) {
+        MessageBoxW(NULL, L"本地端口无效，无法设置系统代理。", L"错误", MB_OK | MB_ICONERROR);
+        return;
+    }
+    wchar_t proxyServerString[256] = {0};
+    wchar_t proxyBypassString[64] = {0};
+    if (enable) {
+        wchar_t addrBuf[128];
+        wsprintfW(addrBuf, L"http=127.0.0.1:%d;socks=127.0.0.1:%d", g_localPort, g_localPort);
+        wcscpy(proxyServerString, addrBuf);
+        wcsncpy(proxyBypassString, L"<local>", 63);
+    }
+    if (IsWindows8OrGreater()) {
+        HKEY hKey;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH_PROXY, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+            log_msg("[Error] Failed to open registry for system proxy.");
+            return;
+        }
+        if (enable) {
+            DWORD dwEnable = 1;
+            RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
+            RegSetValueExW(hKey, L"ProxyOverride", 0, REG_SZ, (const BYTE*)proxyBypassString, (wcslen(proxyBypassString) + 1) * sizeof(wchar_t));
+            RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE*)proxyServerString, (wcslen(proxyServerString) + 1) * sizeof(wchar_t));
+            RegDeleteValueW(hKey, L"SocksProxyServer"); 
+        } else {
+            DWORD dwEnable = 0;
+            RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
+            RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE*)L"", sizeof(wchar_t));
+            RegDeleteValueW(hKey, L"SocksProxyServer");
+        }
+        RegCloseKey(hKey);
+    } else {
+        INTERNET_PER_CONN_OPTION_LISTW list;
+        INTERNET_PER_CONN_OPTIONW options[3];
+        DWORD dwBufSize = sizeof(list);
+        options[0].dwOption = INTERNET_PER_CONN_FLAGS;
+        options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
+        options[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS;
+        if (enable) {
+            options[0].Value.dwValue = PROXY_TYPE_PROXY;
+            options[1].Value.pszValue = proxyServerString;
+            options[2].Value.pszValue = proxyBypassString;
+        } else {
+            options[0].Value.dwValue = PROXY_TYPE_DIRECT;
+            options[1].Value.pszValue = L"";
+            options[2].Value.pszValue = L"";
+        }
+        list.dwSize = sizeof(list);
+        list.pszConnection = NULL;
+        list.dwOptionCount = 3;
+        list.dwOptionError = 0;
+        list.pOptions = options;
+        if (!InternetSetOptionW(NULL, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, dwBufSize)) {
+            log_msg("[Error] InternetSetOptionW failed.");
+            return;
+        }
+    }
+    InternetSetOptionW(NULL, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0);
+    InternetSetOptionW(NULL, INTERNET_OPTION_REFRESH, NULL, 0);
+    log_msg("[System] System proxy %s.", enable ? "enabled" : "disabled");
+}
+
+BOOL IsSystemProxyEnabled() {
+    HKEY hKey;
+    DWORD dwEnable = 0;
+    DWORD dwSize = sizeof(dwEnable);
+    wchar_t proxyServer[1024] = {0};
+    DWORD dwProxySize = sizeof(proxyServer);
+    BOOL isEnabled = FALSE;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH_PROXY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hKey, L"ProxyEnable", NULL, NULL, (LPBYTE)&dwEnable, &dwSize) == ERROR_SUCCESS) {
+            if (dwEnable == 1) {
+                if (RegQueryValueExW(hKey, L"ProxyServer", NULL, NULL, (LPBYTE)proxyServer, &dwProxySize) == ERROR_SUCCESS) {
+                    wchar_t expectedPart[64];
+                    wsprintfW(expectedPart, L"127.0.0.1:%d", g_localPort);
+                    if (wcsstr(proxyServer, expectedPart) != NULL) {
+                        isEnabled = TRUE;
+                    }
+                }
+            }
+        }
+        RegCloseKey(hKey);
+    }
+    return isEnabled;
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_TRAY && LOWORD(lParam) == WM_RBUTTONUP) {
         POINT pt; GetCursorPos(&pt); SetForegroundWindow(hWnd);
@@ -1402,19 +1472,30 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_MANAGE_NODES, L"节点管理");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_IMPORT_CLIPBOARD, L"剪贴板导入 ");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+        UINT proxyFlags = MF_STRING;
+        if (IsSystemProxyEnabled()) proxyFlags |= MF_CHECKED;
+        AppendMenuW(hMenu, proxyFlags, ID_TRAY_SYSTEM_PROXY, L"系统代理");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"程序设置");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW_CONSOLE, L"查看日志");
         AppendMenuW(hMenu, IsAutorun()?MF_CHECKED:MF_UNCHECKED, ID_TRAY_AUTORUN, L"开机自启");
-        // 根据当前状态显示菜单项
         if (g_isIconVisible) AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"隐藏图标");
-        else AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"显示图标"); // 理论上隐藏时点不到菜单，保留逻辑一致性
+        else AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"显示图标");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出程序");
         TrackPopupMenu(hMenu, TPM_RIGHTALIGN|TPM_BOTTOMALIGN, pt.x, pt.y, 0, hWnd, NULL);
     }
     else if (msg == WM_COMMAND) {
         int id = LOWORD(wParam);
-        if (id == ID_TRAY_EXIT) { Shell_NotifyIconW(NIM_DELETE, &nid); StopProxyCore(); ExitProcess(0); }
+        if (id == ID_TRAY_EXIT) { 
+            Shell_NotifyIconW(NIM_DELETE, &nid); 
+            if (IsSystemProxyEnabled()) SetSystemProxy(FALSE);
+            StopProxyCore(); 
+            ExitProcess(0); 
+        }
+        else if (id == ID_TRAY_SYSTEM_PROXY) {
+            BOOL current = IsSystemProxyEnabled();
+            SetSystemProxy(!current);
+        }
         else if (id == ID_TRAY_SHOW_CONSOLE) OpenLogViewer(TRUE);
         else if (id == ID_TRAY_MANAGE_NODES) OpenNodeManager();
         else if (id == ID_TRAY_SETTINGS) OpenSettingsWindow();
@@ -1443,12 +1524,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nShow) {
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     INITCOMMONCONTROLSEX ic = {sizeof(INITCOMMONCONTROLSEX), ICC_HOTKEY_CLASS}; InitCommonControlsEx(&ic);
-    
-    hAppFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-                           DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
+    hAppFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     hLogFont = CreateFontW(14,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,0,0,L"Consolas");
-    
     OpenLogViewer(FALSE); 
     GetModuleFileNameW(NULL, g_iniFilePath, MAX_PATH);
     wchar_t* p = wcsrchr(g_iniFilePath, L'\\'); if (p) { *p = 0; wcscat(g_iniFilePath, L"\\set.ini"); } 
@@ -1461,15 +1538,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     RegisterHotKey(hwnd, ID_GLOBAL_HOTKEY, g_hotkeyModifiers, g_hotkeyVk);
     nid.cbSize = sizeof(nid); nid.hWnd = hwnd; nid.uID = 1; nid.uFlags = NIF_ICON|NIF_MESSAGE|NIF_TIP;
     nid.uCallbackMessage = WM_TRAY; nid.hIcon = wc.hIcon; wcscpy(nid.szTip, L"Proxy Client");
-    
-    // 如果配置为隐藏，启动时不添加托盘图标，并更新状态变量
-    if (g_hideTrayStart == 1) {
-        g_isIconVisible = FALSE;
-    } else {
-        Shell_NotifyIconW(NIM_ADD, &nid);
-        g_isIconVisible = TRUE;
-    }
-
+    if (g_hideTrayStart == 1) { g_isIconVisible = FALSE; } else { Shell_NotifyIconW(NIM_ADD, &nid); g_isIconVisible = TRUE; }
     ParseTags();
     if (nodeCount > 0) SwitchNode(nodeTags[0]);
     MSG msg; while(GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
