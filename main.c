@@ -522,7 +522,7 @@ void SwitchNode(const wchar_t* tag) {
         StartProxyCore();
         wchar_t tip[128]; wsprintfW(tip, L"已切换: %s", tag);
         wcsncpy(nid.szInfo, tip, 127);
-        wcsncpy(nid.szInfoTitle, L"Proxy Client", 63);
+        wcsncpy(nid.szInfoTitle, L"Limbox Client", 63);
         nid.uFlags |= NIF_INFO;
         Shell_NotifyIconW(NIM_MODIFY, &nid);
     }
@@ -1809,7 +1809,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     hwnd = CreateWindowW(L"TrayProxyClass", L"App", 0, 0,0,0,0, NULL,NULL,hInst,NULL);
     RegisterHotKey(hwnd, ID_GLOBAL_HOTKEY, g_hotkeyModifiers, g_hotkeyVk);
     nid.cbSize = sizeof(nid); nid.hWnd = hwnd; nid.uID = 1; nid.uFlags = NIF_ICON|NIF_MESSAGE|NIF_TIP;
-    nid.uCallbackMessage = WM_TRAY; nid.hIcon = wc.hIcon; wcscpy(nid.szTip, L"Proxy Client");
+    nid.uCallbackMessage = WM_TRAY; nid.hIcon = wc.hIcon; wcscpy(nid.szTip, L"Limbox Client");
     if (g_hideTrayStart == 1) { g_isIconVisible = FALSE; } else { Shell_NotifyIconW(NIM_ADD, &nid); g_isIconVisible = TRUE; }
     ParseTags();
     if (nodeCount > 0) SwitchNode(nodeTags[0]);
@@ -1817,3 +1817,4 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     return 0;
 
 }
+
