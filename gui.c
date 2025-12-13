@@ -622,6 +622,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nShow) {
     srand((unsigned)time(NULL)); // 初始化随机数种子
+
+    // --- 新增：强制设置工作目录为 EXE 所在目录 ---
+    // 解决开机启动时工作目录被设为 System32 导致无法读取 config.json 的问题
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    wchar_t* pDir = wcsrchr(exePath, L'\\');
+    if (pDir) {
+        *pDir = 0; // 截断文件名，只保留目录路径
+        SetCurrentDirectoryW(exePath);
+    }
+    // ------------------------------------------------
+
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     INITCOMMONCONTROLSEX ic = {sizeof(INITCOMMONCONTROLSEX), ICC_HOTKEY_CLASS}; InitCommonControlsEx(&ic);
     
@@ -661,5 +673,3 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     MSG msg; while(GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
     return 0;
 }
-
-
