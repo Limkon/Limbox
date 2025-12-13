@@ -42,7 +42,7 @@ jobs:
       shell: msys2 {0}
       run: |
         # 编译指令更新：加入 globals.c
-        gcc gui.c config.c proxy.c crypto.c utils.c globals.c cJSON.c resource.res -o limbox.exe \
+        gcc gui.c config.c proxy.c crypto.c utils.c globals.c cJSON.c resource.res -o Mandala.exe \
           -lssl -lcrypto -lws2_32 -lgdi32 -lcomctl32 -lwininet -lcrypt32 -luser32 \
           -mwindows -municode -finput-charset=UTF-8 -static
           
