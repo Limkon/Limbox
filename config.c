@@ -3,35 +3,16 @@
 #include "proxy.h" 
 #include <stdio.h>
 
-// 全局变量定义
-int g_localPort = 10809;
-int g_hotkeyModifiers = MOD_CONTROL | MOD_ALT;
-int g_hotkeyVk = 'H';
-int g_hideTrayStart = 0;
-
-int g_enableChromeCiphers = 1;
-int g_enableALPN = 1;
-int g_enableFragment = 0;
-int g_fragSizeMin = 5;
-int g_fragSizeMax = 20;
-int g_fragDelayMs = 2;
-int g_enablePadding = 0;
-int g_padSizeMin = 100;
-int g_padSizeMax = 500;
-int g_uaPlatformIndex = 0;
-char g_userAgentStr[512] = "";
-
-wchar_t g_iniFilePath[MAX_PATH];
-struct ProxyConfig g_proxyConfig;
-wchar_t** nodeTags = NULL;
-int nodeCount = 0;
-wchar_t currentNode[64] = {0};
+// --- 注意 ---
+// 这里的 g_localPort, g_iniFilePath 等变量定义已被移除，
+// 因为它们已经存在于 globals.c 中。
+// 我们只定义新增的订阅相关变量。
 
 // --- 新增：订阅列表变量 ---
 Subscription g_subs[MAX_SUBS];
 int g_subCount = 0;
 
-// 辅助：清空所有节点 (用于更新时覆盖)
+// 辅助：清空所有节点
 void ClearAllNodes() {
     char* buffer = NULL; long size = 0;
     if (!ReadFileToBuffer(CONFIG_FILE, &buffer, &size)) return;
@@ -47,15 +28,13 @@ void ClearAllNodes() {
     free(out); cJSON_Delete(root);
 }
 
-// 辅助：解析单个订阅返回的内容并添加到配置
+// 辅助：解析单个订阅数据
 int ParseAndAppendSubscriptionData(const char* data) {
     if (!data) return 0;
     
-    // 尝试 Base64 解码 (绝大多数订阅链接返回的是 Base64 编码的列表)
     size_t decLen = 0;
     unsigned char* decoded = Base64Decode(data, &decLen);
     
-    // 如果解码失败或为空，尝试直接使用原始内容 (兼容明文返回)
     char* sourceText = NULL;
     if (decoded && decLen > 0) {
         sourceText = (char*)decoded;
@@ -68,13 +47,11 @@ int ParseAndAppendSubscriptionData(const char* data) {
 
     int count = 0;
     char* context = NULL;
-    // 按行拆分
     char* line = strtok_s(sourceText, "\r\n ", &context);
     while (line) {
         TrimString(line);
         if (strlen(line) > 0) {
             cJSON* node = NULL;
-            // 尝试解析各种协议
             if (_strnicmp(line, "vmess://", 8) == 0) node = ParseVmess(line);
             else if (_strnicmp(line, "ss://", 5) == 0) node = ParseShadowsocks(line);
             else if (_strnicmp(line, "vless://", 8) == 0) node = ParseVlessOrTrojan(line);
@@ -88,12 +65,12 @@ int ParseAndAppendSubscriptionData(const char* data) {
         }
         line = strtok_s(NULL, "\r\n ", &context);
     }
-    
     free(sourceText);
     return count;
 }
 
 void LoadSettings() {
+    // 读取原有配置
     g_hotkeyModifiers = GetPrivateProfileIntW(L"Settings", L"Modifiers", MOD_CONTROL | MOD_ALT, g_iniFilePath);
     g_hotkeyVk = GetPrivateProfileIntW(L"Settings", L"VK", 'H', g_iniFilePath);
     g_localPort = GetPrivateProfileIntW(L"Settings", L"LocalPort", 10809, g_iniFilePath);
@@ -108,7 +85,6 @@ void LoadSettings() {
     g_fragDelayMs = GetPrivateProfileIntW(L"Settings", L"FragDelay", 2, g_iniFilePath);
 
     g_enablePadding = GetPrivateProfileIntW(L"Settings", L"EnablePadding", 0, g_iniFilePath);
-    
     g_padSizeMin = GetPrivateProfileIntW(L"Settings", L"PadMin", 100, g_iniFilePath);
     g_padSizeMax = GetPrivateProfileIntW(L"Settings", L"PadMax", 500, g_iniFilePath);
 
@@ -243,7 +219,9 @@ void ParseTags() {
 
 void ParseNodeConfigToGlobal(cJSON *node) {
     if (!node) return;
-    memset(&g_proxyConfig, 0, sizeof(g_proxyConfig));
+    // 修复：直接使用 ProxyConfig 类型
+    memset(&g_proxyConfig, 0, sizeof(ProxyConfig));
+    
     strcpy(g_proxyConfig.path, "/"); 
     cJSON *server = cJSON_GetObjectItem(node, "server");
     cJSON *port = cJSON_GetObjectItem(node, "server_port");
