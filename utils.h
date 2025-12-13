@@ -13,4 +13,9 @@ char* GetQueryParam(const char* query, const char* key);
 BOOL ReadFileToBuffer(const wchar_t* filename, char** buffer, long* fileSize);
 BOOL WriteBufferToFile(const wchar_t* filename, const char* buffer);
 
+// --- 新增系统代理相关声明 ---
+BOOL IsWindows8OrGreater();
+void SetSystemProxy(BOOL enable);
+BOOL IsSystemProxyEnabled();
+
 #endif // UTILS_H
