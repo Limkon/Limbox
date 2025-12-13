@@ -48,21 +48,25 @@ static int frag_write(BIO *b, const char *in, int inl) {
     if (!ctx || !next) return 0;
 
     // 随机分片逻辑：仅针对握手阶段 (TLS ClientHello)
-    // 修复：增加最大分片数限制，防止分片过多导致握手超时
+    // 优化：引入智能分片策略，避免过度切分导致丢包
     if (inl > 0 && ctx->first_packet_sent == 0) {
         ctx->first_packet_sent = 1; 
 
         int bytes_sent = 0;
         int remaining = inl;
         int frag_count = 0;
-        const int MAX_FRAGS = 50; // 安全限制：最多切分 50 个包，避免握手太慢
+        
+        // --- 优化核心：限制最大分片数量和范围 ---
+        // 多数 SNI 阻断设备仅检测前几个包或前几百字节。
+        // 限制前 256 字节或 15 个包进行切分，既能混淆 SNI，又能防止因包过多被防火墙丢弃。
+        const int MAX_FRAG_COUNT = 15;   
+        const int MAX_FRAG_BYTES = 256; 
 
         while (remaining > 0) {
             int chunk_size;
 
-            // 策略：如果已经切了太多包，或者剩余数据量很大，则停止切分直接发送剩余部分
-            // 这样既能混淆 SNI (通常在前几百字节)，又能保证握手完成
-            if (frag_count >= MAX_FRAGS) {
+            // 策略：如果已经切了太多包，或者已经覆盖了 SNI 区域，则停止切分直接发送剩余部分
+            if (frag_count >= MAX_FRAG_COUNT || bytes_sent >= MAX_FRAG_BYTES) {
                 chunk_size = remaining;
             } else {
                 int range = g_fragSizeMax - g_fragSizeMin;
@@ -75,9 +79,10 @@ static int frag_write(BIO *b, const char *in, int inl) {
 
             int ret = BIO_write(next, in + bytes_sent, chunk_size);
             
-            // 错误处理：如果底层写入失败
+            // 错误处理：如果底层写入失败或阻塞
             if (ret <= 0) {
-                // 如果之前已经成功发送了一些数据，则返回已发送量，让 OpenSSL 稍后重试剩余部分
+                // 如果之前已经成功发送了一些数据，则返回已发送量。
+                // OpenSSL 会再次调用此函数写入剩余部分（此时 first_packet_sent 已为 1，将直接透传，保证稳健性）。
                 if (bytes_sent > 0) return bytes_sent;
                 return ret;
             }
@@ -86,9 +91,9 @@ static int frag_write(BIO *b, const char *in, int inl) {
             remaining -= ret;
             frag_count++;
 
-            // 仅在还有剩余数据时延时
-            if (remaining > 0 && g_fragDelayMs > 0) {
-                 // 使用随机延时，增加混淆
+            // 仅在确实进行了切分（非最后的大块传输）且配置了延时时 sleep
+            // 避免握手最后阶段无意义的等待
+            if (remaining > 0 && chunk_size < remaining && g_fragDelayMs > 0) {
                  Sleep(rand() % (g_fragDelayMs + 1));
             }
         }
