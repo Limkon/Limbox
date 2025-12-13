@@ -28,8 +28,7 @@ static HWND hSubWnd = NULL;
 #define WM_UPDATE_FINISH (WM_USER + 200)
 
 // --- 辅助函数：字体设置回调 ---
-// [修复] 标准的 EnumChildWindows 回调函数
-// 之前的强制转换会导致参数错位，导致字体无法应用
+// [修复] 标准的 EnumChildWindows 回调函数定义
 BOOL CALLBACK EnumSetFont(HWND hWnd, LPARAM lParam) {
     SendMessageW(hWnd, WM_SETFONT, (WPARAM)lParam, TRUE);
     return TRUE;
@@ -44,30 +43,24 @@ DWORD WINAPI AutoUpdateThread(LPVOID lpParam) {
     if (g_subCount > 0) {
         int count = UpdateAllSubscriptions(FALSE);
         
-        // 如果更新到了节点，通知界面刷新
+        // 如果更新到了节点，仅通知界面刷新，不进行危险的 SwitchNode 操作
         if (count > 0) {
             HWND hMgr = FindWindowW(L"NodeMgr", NULL);
             if (hMgr && IsWindow(hMgr)) {
                 PostMessage(hMgr, WM_REFRESH_NODELIST, 0, 0);
             }
-            
-            // 如果之前没有节点，现在有了，尝试自动切换到第一个
-            if (wcslen(currentNode) == 0) {
-                ParseTags();
-                if (nodeCount > 0) {
-                    SwitchNode(nodeTags[0]);
-                }
-            }
+            // 注意：不要在后台线程调用 SwitchNode，这会导致竞争条件崩溃
         }
     }
     return 0;
 }
 
-// 手动更新线程函数 (解决 UI 卡顿)
+// --- 手动更新线程 (解决 UI 卡死) ---
 DWORD WINAPI ManualUpdateThread(LPVOID param) {
     HWND hWnd = (HWND)param;
     // 执行更新 (TRUE = 强制记录日志)
     int count = UpdateAllSubscriptions(TRUE);
+    // 发送自定义消息通知 UI 线程更新完成
     PostMessage(hWnd, WM_UPDATE_FINISH, (WPARAM)count, 0);
     return 0;
 }
@@ -240,7 +233,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             hPortEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL, WS_CHILD|WS_VISIBLE|ES_NUMBER, 160, y-3, 100, 25, hWnd, (HMENU)ID_PORT_EDIT, NULL,NULL);
             SetDlgItemInt(hWnd, ID_PORT_EDIT, g_localPort, FALSE);
 
-            // 抗封锁设置 GroupBox (扩容)
+            // 抗封锁设置 GroupBox
             y += 50;
             CreateWindowW(L"BUTTON", L"抗封锁策略配置", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 20, y, 420, 340, hWnd, NULL, NULL, NULL);
             
@@ -285,7 +278,6 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 110, y, 100, 32, hWnd, (HMENU)IDOK, NULL,NULL);
             CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 250, y, 100, 32, hWnd, (HMENU)IDCANCEL, NULL,NULL);
 
-            // 初始化控件值
             SendMessage(hChk1, BM_SETCHECK, g_enableChromeCiphers ? BST_CHECKED : BST_UNCHECKED, 0);
             SendMessage(hChk2, BM_SETCHECK, g_enableALPN ? BST_CHECKED : BST_UNCHECKED, 0);
             SendMessage(hChk3, BM_SETCHECK, g_enableFragment ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -302,7 +294,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             SendMessage(hCombo, CB_SETCURSEL, g_uaPlatformIndex, 0);
             SetDlgItemTextA(hWnd, ID_EDIT_UA_STR, g_userAgentStr);
             
-            // [修复] 使用正确的 EnumChildWindows 调用方式
+            // [修复] 正确的 EnumChildWindows 调用
             EnumChildWindows(hWnd, EnumSetFont, (LPARAM)hAppFont);
             SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
             break;
@@ -334,7 +326,6 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 g_uaPlatformIndex = SendMessage(GetDlgItem(hWnd, ID_COMBO_PLATFORM), CB_GETCURSEL, 0, 0);
                 GetDlgItemTextA(hWnd, ID_EDIT_UA_STR, g_userAgentStr, 511);
 
-                // 更新热键
                 LRESULT res = SendMessage(hHotkey, HKM_GETHOTKEY, 0, 0);
                 UINT vk = LOBYTE(res); UINT mod = HIBYTE(res);
                 UINT newMod = 0; if (mod & HOTKEYF_SHIFT) newMod |= MOD_SHIFT;
@@ -354,27 +345,24 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             } else if (LOWORD(wParam) == IDCANCEL) DestroyWindow(hWnd);
             break;
         case WM_CLOSE: DestroyWindow(hWnd); break;
-        case WM_DESTROY: hSettingsWnd = NULL; break; // 窗口销毁时重置句柄
+        case WM_DESTROY: hSettingsWnd = NULL; break;
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
 void OpenSettingsWindow() {
-    // 检查是否已存在窗口，存在则前置
     if (hSettingsWnd && IsWindow(hSettingsWnd)) {
         ShowWindow(hSettingsWnd, SW_RESTORE);
         SetForegroundWindow(hSettingsWnd);
         return;
     }
-
     WNDCLASSW wc = {0}; wc.lpfnWndProc=SettingsWndProc; wc.hInstance=GetModuleHandle(NULL); wc.lpszClassName=L"Settings"; wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
     WNDCLASSW temp; if (!GetClassInfoW(GetModuleHandle(NULL), L"Settings", &temp)) RegisterClassW(&wc);
-    // 宽度调整为 480，高度 560，确保显示完整
     hSettingsWnd = CreateWindowW(L"Settings", L"软件设置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT,0,480,560, hwnd,NULL,wc.hInstance,NULL);
     ShowWindow(hSettingsWnd, SW_SHOW);
 }
 
-// --- 新增：订阅设置窗口逻辑 ---
+// --- 订阅设置窗口逻辑 ---
 
 static HWND hSubList;
 
@@ -386,13 +374,10 @@ void RefreshSubList() {
         li.mask = LVIF_TEXT;
         li.iItem = i;
         li.iSubItem = 0;
-        
         wchar_t wUrl[512];
         MultiByteToWideChar(CP_UTF8, 0, g_subs[i].url, -1, wUrl, 512);
         li.pszText = wUrl;
-        
         ListView_InsertItem(hSubList, &li);
-        // 设置 CheckBox 状态
         ListView_SetCheckState(hSubList, i, g_subs[i].enabled);
     }
 }
@@ -400,108 +385,62 @@ void RefreshSubList() {
 LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch(msg) {
         case WM_CREATE: {
-            // 1. 创建 ListView (URL 列表)
             hSubList = CreateWindowExW(0, WC_LISTVIEWW, NULL, 
                 WS_CHILD|WS_VISIBLE|WS_BORDER|LVS_REPORT|LVS_NOCOLUMNHEADER|LVS_SHOWSELALWAYS|LVS_SINGLESEL, 
                 10, 10, 460, 150, hWnd, (HMENU)ID_SUB_LIST, GetModuleHandle(NULL), NULL);
             
             ListView_SetExtendedListViewStyle(hSubList, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-            
-            LVCOLUMNW lc = {0};
-            lc.mask = LVCF_WIDTH; 
-            lc.cx = 430; 
-            ListView_InsertColumn(hSubList, 0, &lc);
+            LVCOLUMNW lc = {0}; lc.mask = LVCF_WIDTH; lc.cx = 430; ListView_InsertColumn(hSubList, 0, &lc);
 
-            // 2. 创建 URL 输入框和添加按钮
             CreateWindowW(L"STATIC", L"新增地址:", WS_CHILD|WS_VISIBLE, 10, 175, 70, 20, hWnd, NULL,NULL,NULL);
             CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL, 80, 172, 300, 24, hWnd, (HMENU)ID_SUB_URL_EDIT, NULL,NULL);
             CreateWindowW(L"BUTTON", L"添加", WS_CHILD|WS_VISIBLE, 390, 172, 80, 24, hWnd, (HMENU)ID_SUB_ADD_BTN, NULL,NULL);
 
-            // 3. 底部功能按钮
             CreateWindowW(L"BUTTON", L"删除选中", WS_CHILD|WS_VISIBLE, 10, 210, 80, 28, hWnd, (HMENU)ID_SUB_DEL_BTN, NULL,NULL);
             CreateWindowW(L"BUTTON", L"保存设置", WS_CHILD|WS_VISIBLE, 280, 210, 80, 28, hWnd, (HMENU)ID_SUB_SAVE_BTN, NULL,NULL);
             CreateWindowW(L"BUTTON", L"立即更新", WS_CHILD|WS_VISIBLE, 370, 210, 100, 28, hWnd, (HMENU)ID_SUB_UPD_BTN, NULL,NULL);
             
             RefreshSubList();
-            
-            // [修复] 使用正确的 EnumChildWindows 调用方式
             EnumChildWindows(hWnd, EnumSetFont, (LPARAM)hAppFont);
             SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
             break;
         }
         case WM_COMMAND: {
             int id = LOWORD(wParam);
-            
-            if (id == ID_SUB_ADD_BTN) { // 添加
-                if (g_subCount >= MAX_SUBS) {
-                    MessageBoxW(hWnd, L"已达最大订阅数限制(20个)", L"提示", MB_OK);
-                    break;
-                }
-                char newUrl[512];
-                GetDlgItemTextA(hWnd, ID_SUB_URL_EDIT, newUrl, 512);
+            if (id == ID_SUB_ADD_BTN) {
+                if (g_subCount >= MAX_SUBS) { MessageBoxW(hWnd, L"已达最大订阅数限制(20个)", L"提示", MB_OK); break; }
+                char newUrl[512]; GetDlgItemTextA(hWnd, ID_SUB_URL_EDIT, newUrl, 512);
                 TrimString(newUrl);
-                if (strlen(newUrl) < 4) {
-                    MessageBoxW(hWnd, L"请输入有效的订阅地址", L"错误", MB_OK);
-                    break;
-                }
-                // 加入列表
-                strcpy(g_subs[g_subCount].url, newUrl);
-                g_subs[g_subCount].enabled = TRUE;
-                g_subCount++;
-                
-                RefreshSubList();
-                SetDlgItemTextA(hWnd, ID_SUB_URL_EDIT, ""); // 清空输入框
+                if (strlen(newUrl) < 4) { MessageBoxW(hWnd, L"请输入有效的订阅地址", L"错误", MB_OK); break; }
+                strcpy(g_subs[g_subCount].url, newUrl); g_subs[g_subCount].enabled = TRUE; g_subCount++;
+                RefreshSubList(); SetDlgItemTextA(hWnd, ID_SUB_URL_EDIT, "");
             }
-            else if (id == ID_SUB_DEL_BTN) { // 删除
+            else if (id == ID_SUB_DEL_BTN) {
                 int sel = ListView_GetNextItem(hSubList, -1, LVNI_SELECTED);
                 if (sel != -1) {
-                    // 移动删除
-                    for (int i = sel; i < g_subCount - 1; i++) {
-                        g_subs[i] = g_subs[i+1];
-                    }
-                    g_subCount--;
-                    RefreshSubList();
-                } else {
-                    MessageBoxW(hWnd, L"请先在列表中选中一项", L"提示", MB_OK);
-                }
+                    for (int i = sel; i < g_subCount - 1; i++) g_subs[i] = g_subs[i+1];
+                    g_subCount--; RefreshSubList();
+                } else MessageBoxW(hWnd, L"请先在列表中选中一项", L"提示", MB_OK);
             }
-            else if (id == ID_SUB_SAVE_BTN) { // 保存
-                // 同步 CheckBox 状态
-                for(int i=0; i<g_subCount; i++) {
-                    g_subs[i].enabled = ListView_GetCheckState(hSubList, i);
-                }
-                SaveSettings();
-                MessageBoxW(hWnd, L"订阅设置已保存", L"成功", MB_OK);
+            else if (id == ID_SUB_SAVE_BTN) {
+                for(int i=0; i<g_subCount; i++) g_subs[i].enabled = ListView_GetCheckState(hSubList, i);
+                SaveSettings(); MessageBoxW(hWnd, L"订阅设置已保存", L"成功", MB_OK);
             }
-            else if (id == ID_SUB_UPD_BTN) { // [修复] 立即更新 (多线程版)
-                // 1. 同步 CheckBox 状态
-                for(int i=0; i<g_subCount; i++) {
-                    g_subs[i].enabled = ListView_GetCheckState(hSubList, i);
-                }
+            else if (id == ID_SUB_UPD_BTN) { // [修复] 异步更新
+                for(int i=0; i<g_subCount; i++) g_subs[i].enabled = ListView_GetCheckState(hSubList, i);
                 SaveSettings(); 
-
-                // 2. 更新界面状态 (禁用按钮，防止重复点击)
                 SetWindowTextW(hWnd, L"正在更新 (后台进行中)...");
                 EnableWindow(GetDlgItem(hWnd, ID_SUB_UPD_BTN), FALSE); 
-                
-                // 3. 启动后台线程执行更新，避免阻塞 UI
                 CreateThread(NULL, 0, ManualUpdateThread, (LPVOID)hWnd, 0, NULL);
             }
             break;
         }
-        // [新增] 处理线程完成消息
-        case WM_UPDATE_FINISH: {
+        case WM_UPDATE_FINISH: { // [新增] 处理更新完成消息
             int count = (int)wParam;
-            
-            // 恢复按钮和窗口标题
             EnableWindow(GetDlgItem(hWnd, ID_SUB_UPD_BTN), TRUE);
             SetWindowTextW(hWnd, L"订阅设置");
-            
-            wchar_t msg[128];
-            wsprintfW(msg, L"更新完成，共获取 %d 个节点。", count);
+            wchar_t msg[128]; wsprintfW(msg, L"更新完成，共获取 %d 个节点。", count);
             MessageBoxW(hWnd, msg, L"结果", MB_OK);
-            
-            // 刷新主界面列表
             HWND hMgr = FindWindowW(L"NodeMgr", NULL);
             if (hMgr) SendMessage(hMgr, WM_REFRESH_NODELIST, 0, 0);
             break;
@@ -513,25 +452,15 @@ LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 void OpenSubWindow() {
-    // 单例检查：如果窗口已存在，直接显示并置顶
-    if (hSubWnd && IsWindow(hSubWnd)) {
-        ShowWindow(hSubWnd, SW_RESTORE);
-        SetForegroundWindow(hSubWnd);
-        return;
-    }
+    if (hSubWnd && IsWindow(hSubWnd)) { ShowWindow(hSubWnd, SW_RESTORE); SetForegroundWindow(hSubWnd); return; }
     WNDCLASSW wc = {0};
     if (!GetClassInfoW(GetModuleHandle(NULL), L"SubWnd", &wc)) {
         wc.lpfnWndProc = SubWndProc; wc.hInstance = GetModuleHandle(NULL); 
         wc.lpszClassName = L"SubWnd"; wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE+1);
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        RegisterClassW(&wc);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW); RegisterClassW(&wc);
     }
-    // 创建窗口
-    hSubWnd = CreateWindowW(L"SubWnd", L"订阅设置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, 
-        CW_USEDEFAULT,0,500,290, NULL,NULL,GetModuleHandle(NULL),NULL);
-        
-    ShowWindow(hSubWnd, SW_SHOW);
-    UpdateWindow(hSubWnd);
+    hSubWnd = CreateWindowW(L"SubWnd", L"订阅设置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT,0,500,290, NULL,NULL,GetModuleHandle(NULL),NULL);
+    ShowWindow(hSubWnd, SW_SHOW); UpdateWindow(hSubWnd);
 }
 
 // --- 节点管理窗口 ---
@@ -547,10 +476,8 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             
             CreateWindowW(L"BUTTON", L"编辑选中节点", WS_CHILD | WS_VISIBLE, 10, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_EDIT, NULL, NULL);
             CreateWindowW(L"BUTTON", L"删除选中节点", WS_CHILD | WS_VISIBLE, 140, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_DEL, NULL, NULL);
-            // 按钮名称已改为 "订阅设置"
             CreateWindowW(L"BUTTON", L"订阅设置", WS_CHILD | WS_VISIBLE, 270, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_SUB, NULL, NULL);
 
-            // [修复] 使用正确的 EnumChildWindows 调用方式
             EnumChildWindows(hWnd, EnumSetFont, (LPARAM)hAppFont);
             SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
             SendMessage(hWnd, WM_REFRESH_NODELIST, 0, 0); 
@@ -561,15 +488,10 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             for(int i = 0; i < nodeCount; i++) SendMessageW(hList, LB_ADDSTRING, 0, (LPARAM)nodeTags[i]);
             break;
         case WM_COMMAND:
-            if (LOWORD(wParam) == ID_NODEMGR_SUB) {
-                OpenSubWindow();
-            }
+            if (LOWORD(wParam) == ID_NODEMGR_SUB) OpenSubWindow();
             else if (LOWORD(wParam) == ID_NODEMGR_EDIT) {
                 int selCount = SendMessage(hList, LB_GETSELCOUNT, 0, 0);
-                if (selCount <= 0) {
-                    MessageBoxW(hWnd, L"请先选择一个需要编辑的节点！", L"提示", MB_OK|MB_ICONWARNING);
-                    break;
-                }
+                if (selCount <= 0) { MessageBoxW(hWnd, L"请先选择一个需要编辑的节点！", L"提示", MB_OK|MB_ICONWARNING); break; }
                 int selIndex = 0;
                 if (SendMessage(hList, LB_GETSELITEMS, 1, (LPARAM)&selIndex) == LB_ERR) break; 
                 int len = SendMessage(hList, LB_GETTEXTLEN, selIndex, 0);
@@ -621,88 +543,38 @@ void OpenNodeManager() {
 LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch(msg) {
         case WM_CREATE: {
-            int x = 25, w_lbl = 110, w_edit = 300, h = 24, gap = 40; 
-            int y = 20;
+            int x = 25, w_lbl = 110, w_edit = 300, h = 24, gap = 40; int y = 20;
             #define CREATE_LABEL(txt) CreateWindowW(L"STATIC", txt, WS_CHILD|WS_VISIBLE, x, y, w_lbl, h, hWnd, NULL, NULL, NULL)
             #define CREATE_EDIT(id, styles) CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|styles, x+w_lbl, y-2, w_edit, h+4, hWnd, (HMENU)id, NULL, NULL)
             #define CREATE_COMBO(id) CreateWindowW(L"COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, x+w_lbl, y-2, 140, 200, hWnd, (HMENU)id, NULL, NULL)
-            CREATE_LABEL(L"节点备注:");
-            CREATE_EDIT(ID_EDIT_TAG, ES_AUTOHSCROLL);
-            y += gap;
-            CREATE_LABEL(L"服务器地址:");
-            CREATE_EDIT(ID_EDIT_ADDR, ES_AUTOHSCROLL);
-            y += gap;
-            CREATE_LABEL(L"服务器端口:");
-            CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER, x+w_lbl, y-2, 80, h+4, hWnd, (HMENU)ID_EDIT_PORT, NULL, NULL);
-            y += gap + 10;
-            CreateWindowW(L"STATIC", L"认证信息", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
-            y += 25;
-            CREATE_LABEL(L"用户/UUID:");
-            CREATE_EDIT(ID_EDIT_USER, ES_AUTOHSCROLL);
-            y += gap;
-            CREATE_LABEL(L"连接密码:");
-            CREATE_EDIT(ID_EDIT_PASS, ES_AUTOHSCROLL);
-            y += gap + 10;
-            CreateWindowW(L"STATIC", L"传输配置", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
-            y += 25;
-            CREATE_LABEL(L"传输协议:");
-            HWND hNet = CREATE_COMBO(ID_EDIT_NET);
-            AddComboItem(hNet, L"tcp", TRUE); AddComboItem(hNet, L"ws", FALSE);
-            y += gap;
-            CREATE_LABEL(L"伪装类型:");
-            HWND hType = CREATE_COMBO(ID_EDIT_TYPE);
-            AddComboItem(hType, L"none", TRUE);
-            y += gap;
-            CREATE_LABEL(L"伪装域名:");
-            CREATE_EDIT(ID_EDIT_HOST, ES_AUTOHSCROLL);
-            y += gap;
-            CREATE_LABEL(L"请求路径:");
-            CREATE_EDIT(ID_EDIT_PATH, ES_AUTOHSCROLL);
-            y += gap;
-            CREATE_LABEL(L"传输安全:");
-            HWND hTls = CREATE_COMBO(ID_EDIT_TLS);
-            AddComboItem(hTls, L"none", TRUE); AddComboItem(hTls, L"tls", FALSE);
-            y += gap + 30;
+            CREATE_LABEL(L"节点备注:"); CREATE_EDIT(ID_EDIT_TAG, ES_AUTOHSCROLL); y += gap;
+            CREATE_LABEL(L"服务器地址:"); CREATE_EDIT(ID_EDIT_ADDR, ES_AUTOHSCROLL); y += gap;
+            CREATE_LABEL(L"服务器端口:"); CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER, x+w_lbl, y-2, 80, h+4, hWnd, (HMENU)ID_EDIT_PORT, NULL, NULL); y += gap + 10;
+            CreateWindowW(L"STATIC", L"认证信息", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL); y += 25;
+            CREATE_LABEL(L"用户/UUID:"); CREATE_EDIT(ID_EDIT_USER, ES_AUTOHSCROLL); y += gap;
+            CREATE_LABEL(L"连接密码:"); CREATE_EDIT(ID_EDIT_PASS, ES_AUTOHSCROLL); y += gap + 10;
+            CreateWindowW(L"STATIC", L"传输配置", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL); y += 25;
+            CREATE_LABEL(L"传输协议:"); HWND hNet = CREATE_COMBO(ID_EDIT_NET); AddComboItem(hNet, L"tcp", TRUE); AddComboItem(hNet, L"ws", FALSE); y += gap;
+            CREATE_LABEL(L"伪装类型:"); HWND hType = CREATE_COMBO(ID_EDIT_TYPE); AddComboItem(hType, L"none", TRUE); y += gap;
+            CREATE_LABEL(L"伪装域名:"); CREATE_EDIT(ID_EDIT_HOST, ES_AUTOHSCROLL); y += gap;
+            CREATE_LABEL(L"请求路径:"); CREATE_EDIT(ID_EDIT_PATH, ES_AUTOHSCROLL); y += gap;
+            CREATE_LABEL(L"传输安全:"); HWND hTls = CREATE_COMBO(ID_EDIT_TLS); AddComboItem(hTls, L"none", TRUE); AddComboItem(hTls, L"tls", FALSE); y += gap + 30;
             CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 120, y, 100, 32, hWnd, (HMENU)IDOK, NULL, NULL);
-            CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 260, y, 100, 32, hWnd, (HMENU)IDCANCEL, NULL, NULL);
-            y += 80; 
-            g_nEditContentHeight = y; 
-            g_nEditScrollPos = 0;
-            
-            // [修复] 使用正确的 EnumChildWindows 调用方式
-            EnumChildWindows(hWnd, EnumSetFont, (LPARAM)hAppFont);
-            if (hAppFont) SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
-            
+            CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 260, y, 100, 32, hWnd, (HMENU)IDCANCEL, NULL, NULL); y += 80; 
+            g_nEditContentHeight = y; g_nEditScrollPos = 0;
+            EnumChildWindows(hWnd, EnumSetFont, (LPARAM)hAppFont); if (hAppFont) SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
             LoadNodeToEdit(hWnd, g_editingTag);
-            SCROLLINFO si;
-            si.cbSize = sizeof(si);
-            si.fMask = SIF_RANGE | SIF_PAGE;
-            si.nMin = 0;
-            si.nMax = g_nEditContentHeight;
-            si.nPage = 680; 
-            SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
+            SCROLLINFO si; si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_PAGE; si.nMin = 0; si.nMax = g_nEditContentHeight; si.nPage = 680; SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
             break;
         }
         case WM_SIZE: {
             RECT rc; GetClientRect(hWnd, &rc);
-            int clientHeight = rc.bottom - rc.top;
-            SCROLLINFO si;
-            si.cbSize = sizeof(si);
-            si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-            si.nMin = 0;
-            si.nMax = g_nEditContentHeight;
-            si.nPage = clientHeight;
-            si.nPos = g_nEditScrollPos;
-            SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
-            break;
+            SCROLLINFO si; si.cbSize = sizeof(si); si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS; si.nMin = 0; si.nMax = g_nEditContentHeight; si.nPage = rc.bottom - rc.top; si.nPos = g_nEditScrollPos;
+            SetScrollInfo(hWnd, SB_VERT, &si, TRUE); break;
         }
         case WM_VSCROLL: {
-            SCROLLINFO si;
-            si.cbSize = sizeof(si);
-            si.fMask = SIF_ALL;
-            GetScrollInfo(hWnd, SB_VERT, &si);
-            int oldPos = si.nPos;
-            int newPos = oldPos;
+            SCROLLINFO si; si.cbSize = sizeof(si); si.fMask = SIF_ALL; GetScrollInfo(hWnd, SB_VERT, &si);
+            int oldPos = si.nPos; int newPos = oldPos;
             switch (LOWORD(wParam)) {
                 case SB_TOP: newPos = si.nMin; break;
                 case SB_BOTTOM: newPos = si.nMax; break;
@@ -712,34 +584,23 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 case SB_PAGEDOWN: newPos += si.nPage; break;
                 case SB_THUMBTRACK: newPos = si.nTrackPos; break;
             }
-            if (newPos < 0) newPos = 0;
-            if (newPos > (int)(si.nMax - si.nPage + 1)) newPos = si.nMax - si.nPage + 1;
+            if (newPos < 0) newPos = 0; if (newPos > (int)(si.nMax - si.nPage + 1)) newPos = si.nMax - si.nPage + 1;
             if (newPos != oldPos) {
-                ScrollWindow(hWnd, 0, oldPos - newPos, NULL, NULL);
-                si.fMask = SIF_POS;
-                si.nPos = newPos;
-                SetScrollInfo(hWnd, SB_VERT, &si, TRUE);
-                UpdateWindow(hWnd);
-                g_nEditScrollPos = newPos;
+                ScrollWindow(hWnd, 0, oldPos - newPos, NULL, NULL); si.fMask = SIF_POS; si.nPos = newPos;
+                SetScrollInfo(hWnd, SB_VERT, &si, TRUE); UpdateWindow(hWnd); g_nEditScrollPos = newPos;
             }
             break;
         }
         case WM_MOUSEWHEEL: {
-            int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-            int scrollLines = 3; 
+            int zDelta = GET_WHEEL_DELTA_WPARAM(wParam); int scrollLines = 3; 
             SystemParametersInfo(SPI_GETWHEELSCROLLLINES, 0, &scrollLines, 0);
-            for(int i=0; i<scrollLines; i++) {
-                SendMessage(hWnd, WM_VSCROLL, zDelta > 0 ? SB_LINEUP : SB_LINEDOWN, 0);
-            }
+            for(int i=0; i<scrollLines; i++) SendMessage(hWnd, WM_VSCROLL, zDelta > 0 ? SB_LINEUP : SB_LINEDOWN, 0);
             break;
         }
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK) {
-                SaveEditedNode(hWnd);
-                MessageBoxW(hWnd, L"节点配置已更新", L"操作成功", MB_OK);
-                DestroyWindow(hWnd);
-                HWND hMgr = FindWindowW(L"NodeMgr", NULL);
-                if (hMgr) SendMessage(hMgr, WM_REFRESH_NODELIST, 0, 0);
+                SaveEditedNode(hWnd); MessageBoxW(hWnd, L"节点配置已更新", L"操作成功", MB_OK); DestroyWindow(hWnd);
+                HWND hMgr = FindWindowW(L"NodeMgr", NULL); if (hMgr) SendMessage(hMgr, WM_REFRESH_NODELIST, 0, 0);
             } else if (LOWORD(wParam) == IDCANCEL) DestroyWindow(hWnd);
             break;
         case WM_CLOSE: DestroyWindow(hWnd); break;
@@ -764,8 +625,7 @@ LRESULT CALLBACK LogWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch(msg) {
         case WM_CREATE:
             hEdit = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_VSCROLL|ES_MULTILINE|ES_READONLY, 0,0,0,0, hWnd, (HMENU)ID_LOGVIEWER_EDIT, NULL, NULL);
-            SendMessage(hEdit, WM_SETFONT, (WPARAM)hLogFont, 0);
-            break;
+            SendMessage(hEdit, WM_SETFONT, (WPARAM)hLogFont, 0); break;
         case WM_SIZE: MoveWindow(hEdit, 0, 0, LOWORD(lParam), HIWORD(lParam), TRUE); break;
         case WM_LOG_UPDATE: {
             wchar_t* p = (wchar_t*)lParam; int len = GetWindowTextLength(hEdit);
@@ -806,14 +666,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_MANAGE_NODES, L"节点管理");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_IMPORT_CLIPBOARD, L"节点导入");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-        UINT proxyFlags = MF_STRING;
-        if (IsSystemProxyEnabled()) proxyFlags |= MF_CHECKED;
+        UINT proxyFlags = MF_STRING; if (IsSystemProxyEnabled()) proxyFlags |= MF_CHECKED;
         AppendMenuW(hMenu, proxyFlags, ID_TRAY_SYSTEM_PROXY, L"系统代理");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"软件设置");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW_CONSOLE, L"查看日志");
         AppendMenuW(hMenu, IsAutorun()?MF_CHECKED:MF_UNCHECKED, ID_TRAY_AUTORUN, L"开机启动");
-        if (g_isIconVisible) AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"隐藏图标");
-        else AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"显示图标");
+        if (g_isIconVisible) AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"隐藏图标"); else AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"显示图标");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出程序");
         TrackPopupMenu(hMenu, TPM_RIGHTALIGN|TPM_BOTTOMALIGN, pt.x, pt.y, 0, hWnd, NULL);
@@ -821,15 +679,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     else if (msg == WM_COMMAND) {
         int id = LOWORD(wParam);
         if (id == ID_TRAY_EXIT) { 
-            Shell_NotifyIconW(NIM_DELETE, &nid); 
-            if (IsSystemProxyEnabled()) SetSystemProxy(FALSE);
-            StopProxyCore(); 
-            ExitProcess(0); 
+            Shell_NotifyIconW(NIM_DELETE, &nid); if (IsSystemProxyEnabled()) SetSystemProxy(FALSE); StopProxyCore(); ExitProcess(0); 
         }
-        else if (id == ID_TRAY_SYSTEM_PROXY) {
-            BOOL current = IsSystemProxyEnabled();
-            SetSystemProxy(!current);
-        }
+        else if (id == ID_TRAY_SYSTEM_PROXY) SetSystemProxy(!IsSystemProxyEnabled());
         else if (id == ID_TRAY_SHOW_CONSOLE) OpenLogViewer(TRUE);
         else if (id == ID_TRAY_MANAGE_NODES) OpenNodeManager();
         else if (id == ID_TRAY_SETTINGS) OpenSettingsWindow();
@@ -856,38 +708,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nShow) {
-    srand((unsigned)time(NULL)); // 初始化随机数种子
+    srand((unsigned)time(NULL));
 
-    // --- 强制设置工作目录 ---
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    wchar_t* pDir = wcsrchr(exePath, L'\\');
-    if (pDir) {
-        *pDir = 0; 
-        SetCurrentDirectoryW(exePath);
-    }
+    wchar_t exePath[MAX_PATH]; GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    wchar_t* pDir = wcsrchr(exePath, L'\\'); if (pDir) { *pDir = 0; SetCurrentDirectoryW(exePath); }
 
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+    
+    // [新增] 必须在主线程最开始初始化 OpenSSL 全局表
+    init_openssl_global(); 
+
     INITCOMMONCONTROLSEX ic = {sizeof(INITCOMMONCONTROLSEX), ICC_HOTKEY_CLASS}; InitCommonControlsEx(&ic);
-    
-    // 获取系统菜单字体 (与主程序一致)
     NONCLIENTMETRICSW ncm = { sizeof(NONCLIENTMETRICSW) };
-    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICSW), &ncm, 0)) {
-        hAppFont = CreateFontIndirectW(&ncm.lfMenuFont);
-    } else {
-        hAppFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
-    }
-    
+    if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICSW), &ncm, 0)) hAppFont = CreateFontIndirectW(&ncm.lfMenuFont);
+    else hAppFont = CreateFontW(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei");
     hLogFont = CreateFontW(14,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,0,0,L"Consolas");
     
     OpenLogViewer(FALSE); 
     GetModuleFileNameW(NULL, g_iniFilePath, MAX_PATH);
-    wchar_t* p = wcsrchr(g_iniFilePath, L'\\'); if (p) { *p = 0; wcscat(g_iniFilePath, L"\\set.ini"); } 
-    else wcscpy(g_iniFilePath, L"set.ini");
+    wchar_t* p = wcsrchr(g_iniFilePath, L'\\'); if (p) { *p = 0; wcscat(g_iniFilePath, L"\\set.ini"); } else wcscpy(g_iniFilePath, L"set.ini");
     
     LoadSettings();
-
-    // 启动自动更新线程
     CreateThread(NULL, 0, AutoUpdateThread, NULL, 0, NULL);
     
     WNDCLASSW wc = {0}; wc.lpfnWndProc = WndProc; wc.hInstance = hInst; wc.lpszClassName = L"TrayProxyClass";
@@ -899,12 +740,15 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     
     nid.cbSize = sizeof(nid); nid.hWnd = hwnd; nid.uID = 1; nid.uFlags = NIF_ICON|NIF_MESSAGE|NIF_TIP;
     nid.uCallbackMessage = WM_TRAY; nid.hIcon = wc.hIcon; wcscpy(nid.szTip, L"Mandala Client");
-    
     if (g_hideTrayStart == 1) { g_isIconVisible = FALSE; } else { Shell_NotifyIconW(NIM_ADD, &nid); g_isIconVisible = TRUE; }
     
     ParseTags();
     if (nodeCount > 0) SwitchNode(nodeTags[0]);
     
     MSG msg; while(GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    
+    // [新增] 程序退出前清理
+    FreeGlobalSSLContext();
+    
     return 0;
 }
