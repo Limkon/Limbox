@@ -42,7 +42,7 @@ static int frag_free(BIO *b) {
     return 1;
 }
 
-// 核心优化：智能分片写入逻辑
+// --- 核心优化：智能分片写入逻辑 ---
 static int frag_write(BIO *b, const char *in, int inl) {
     FragCtx *ctx = (FragCtx *)BIO_get_data(b);
     BIO *next = BIO_next(b);
@@ -56,10 +56,10 @@ static int frag_write(BIO *b, const char *in, int inl) {
         int remaining = inl;
         int frag_count = 0;
         
-        // --- 硬编码最佳安全阈值 ---
-        // 1. MAX_FRAG_BYTES (512): 覆盖绝大多数 SNI 扩展位置，确保关键信息被切分。
-        //    超过此范围后的数据（如长 Padding 或后续扩展）不切分，以提升速度。
-        // 2. MAX_FRAG_COUNT (100): 防止因配置错误（如 1 字节切片）产生数千个小包导致被防火墙丢弃。
+        // [最佳实践硬编码]
+        // 1. MAX_FRAG_BYTES (512): 覆盖绝大多数 SNI 位置，确保关键信息被切分。
+        //    超过此范围后的数据（如长 Padding）不切分，提升握手速度。
+        // 2. MAX_FRAG_COUNT (100): 允许较细粒度（如 3-5 字节）的切分，而不至于过早耗尽次数。
         const int MAX_FRAG_COUNT = 100;   
         const int MAX_FRAG_BYTES = 512; 
 
@@ -83,7 +83,6 @@ static int frag_write(BIO *b, const char *in, int inl) {
             
             // 错误处理：如果底层写入失败
             if (ret <= 0) {
-                // 如果之前已经成功发送了一些数据，则返回已发送量，让 OpenSSL 稍后重试
                 if (bytes_sent > 0) return bytes_sent;
                 return ret;
             }
@@ -92,7 +91,7 @@ static int frag_write(BIO *b, const char *in, int inl) {
             remaining -= ret;
             frag_count++;
 
-            // 智能延时：仅在确实进行了切分（非最后的大块直传）且用户开启了延时时 Sleep
+            // 智能延时：仅在确实进行了切分时延时
             if (remaining > 0 && chunk_size < remaining && g_fragDelayMs > 0) {
                  Sleep(rand() % (g_fragDelayMs + 1));
             }
@@ -146,13 +145,11 @@ void init_openssl_global() {
         log_msg("[Security] Standard OpenSSL Cipher Suites");
     }
 
-    // 从资源载入证书 (ID: 2, Type: RT_RCDATA)
     HRSRC hRes = FindResourceW(NULL, MAKEINTRESOURCEW(2), RT_RCDATA);
     if (hRes) {
         HGLOBAL hData = LoadResource(NULL, hRes);
         void* pData = LockResource(hData);
         DWORD dataSize = SizeofResource(NULL, hRes);
-
         if (pData && dataSize > 0) {
             BIO *cbio = BIO_new_mem_buf(pData, dataSize);
             if (cbio) {
@@ -164,7 +161,6 @@ void init_openssl_global() {
                     X509_free(x);
                 }
                 BIO_free(cbio);
-
                 if (count > 0) {
                     SSL_CTX_set_verify(g_ssl_ctx, SSL_VERIFY_PEER, NULL);
                     log_msg("[Security] Embedded CA loaded (%d certs). Strict mode.", count);
@@ -186,7 +182,7 @@ void init_openssl_global() {
     }
 }
 
-// 核心优化：Padding 设置逻辑
+// --- 核心优化：Padding 强制安全底线 ---
 int tls_init_connect(TLSContext *ctx) {
     ctx->ssl = SSL_new(g_ssl_ctx);
     
@@ -196,14 +192,14 @@ int tls_init_connect(TLSContext *ctx) {
         
         int blockSize = g_padSizeMin + (range > 0 ? (rand() % (range + 1)) : 0);
         
-        // --- 硬编码最小安全块大小 ---
-        // 防止计算出的 blockSize 过小（如 1），导致 Padding 无效或无法掩盖特征
+        // [最佳实践硬编码]
+        // 强制最小安全块大小为 16 字节。
+        // 防止计算出的 blockSize 过小（如 1-5），导致无法有效掩盖流量特征。
         const int MIN_SAFE_BLOCK = 16; 
         if (blockSize < MIN_SAFE_BLOCK) {
             blockSize = MIN_SAFE_BLOCK;
         }
         
-        // OpenSSL 限制
         if (blockSize > 16384) blockSize = 16384;
 
         if (blockSize > 0) {
@@ -213,7 +209,6 @@ int tls_init_connect(TLSContext *ctx) {
 
     BIO *bio = BIO_new_socket(ctx->sock, BIO_NOCLOSE);
     
-    // 挂载分片 BIO
     if (g_enableFragment) {
         BIO *frag = BIO_new(BIO_f_fragment());
         bio = BIO_push(frag, bio);
