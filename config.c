@@ -430,4 +430,21 @@ int ImportFromClipboard() {
     }
     free(text);
     return successCount;
+
+}
+// --- 追加到 config.c 末尾 ---
+
+void ToggleTrayIcon() {
+    if (g_isIconVisible) { 
+        Shell_NotifyIconW(NIM_DELETE, &nid); 
+        g_isIconVisible = FALSE; 
+        g_hideTrayStart = 1;
+    }
+    else { 
+        nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        Shell_NotifyIconW(NIM_ADD, &nid); 
+        g_isIconVisible = TRUE; 
+        g_hideTrayStart = 0;
+    }
+    SaveSettings();
 }
