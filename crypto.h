@@ -4,19 +4,20 @@
 #include <winsock2.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include "common.h"
+#include "common.h" // [修复] 引入 common.h 以使用其中定义的 TLSContext
 
-typedef struct {
-    SOCKET sock;
-    SSL *ssl;
-} TLSContext;
+// [修复] 删除此处重复定义的 TLSContext
+// typedef struct {
+//     SOCKET sock;
+//     SSL *ssl;
+// } TLSContext;
 
 extern SSL_CTX *g_ssl_ctx;
 
 void init_openssl_global();
 void FreeGlobalSSLContext();
 
-// [修改] 增加 mode 参数: 0=默认(温和), 1=强力(自动重试时使用)
+// mode: 0=默认(温和), 1=强力(自动重试)
 int tls_init_connect(TLSContext *ctx, int mode);
 
 int tls_write(TLSContext *ctx, const char *data, int len);
