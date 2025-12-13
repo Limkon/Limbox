@@ -9,6 +9,8 @@ WNDPROC g_oldListBoxProc = NULL;
 
 // 用于追踪设置窗口的句柄，实现单例模式
 static HWND hSettingsWnd = NULL;
+// 用于追踪订阅窗口的句柄，实现单例模式
+static HWND hSubWnd = NULL;
 
 // --- 辅助函数 ---
 
@@ -314,7 +316,7 @@ void OpenSettingsWindow() {
     ShowWindow(hSettingsWnd, SW_SHOW);
 }
 
-// --- 新增：订阅窗口逻辑 ---
+// --- 新增：订阅窗口逻辑 (修复无响应问题) ---
 
 LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch(msg) {
@@ -345,9 +347,10 @@ LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 strcpy(g_subUrl, newUrl);
                 SaveSettings();
 
-                // 简单的阻塞式更新提示
+                // 阻塞式更新前准备：设置光标，更新文本，强制刷新界面
                 HCURSOR hOld = SetCursor(LoadCursor(NULL, IDC_WAIT));
                 SetWindowTextW(hWnd, L"正在下载并解析...");
+                UpdateWindow(hWnd); // 关键：强制立即重绘，避免界面卡死白屏
                 
                 int count = UpdateNodesFromSubscription(g_subUrl);
                 
@@ -377,25 +380,34 @@ LRESULT CALLBACK SubWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
         case WM_CLOSE: DestroyWindow(hWnd); break;
+        case WM_DESTROY: hSubWnd = NULL; break; // 窗口销毁时重置单例句柄
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
 void OpenSubWindow() {
+    // 单例模式检查：如果窗口已存在，则恢复并前置
+    if (hSubWnd && IsWindow(hSubWnd)) {
+        ShowWindow(hSubWnd, SW_RESTORE);
+        SetForegroundWindow(hSubWnd);
+        return;
+    }
+
     WNDCLASSW wc = {0};
     if (!GetClassInfoW(GetModuleHandle(NULL), L"SubWnd", &wc)) {
         wc.lpfnWndProc = SubWndProc; wc.hInstance = GetModuleHandle(NULL); 
         wc.lpszClassName = L"SubWnd"; wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE+1);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW); // 显式加载箭头光标
         RegisterClassW(&wc);
     }
-    HWND h = CreateWindowW(L"SubWnd", L"订阅设置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT,0,400,180, NULL,NULL,GetModuleHandle(NULL),NULL);
+    hSubWnd = CreateWindowW(L"SubWnd", L"订阅设置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT,0,400,180, NULL,NULL,GetModuleHandle(NULL),NULL);
 }
 
 // --- 节点管理窗口 ---
 
 LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hList;
-    #define ID_NODEMGR_SUB 2003 // 新增的订阅按钮 ID
+    #define ID_NODEMGR_SUB 2003 
 
     switch(msg) {
         case WM_CREATE:
@@ -404,8 +416,8 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             
             CreateWindowW(L"BUTTON", L"编辑选中节点", WS_CHILD | WS_VISIBLE, 10, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_EDIT, NULL, NULL);
             CreateWindowW(L"BUTTON", L"删除选中节点", WS_CHILD | WS_VISIBLE, 140, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_DEL, NULL, NULL);
-            // 新增订阅按钮
-            CreateWindowW(L"BUTTON", L"订阅更新", WS_CHILD | WS_VISIBLE, 270, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_SUB, NULL, NULL);
+            // 修改：将按钮名称从“订阅更新”改为“订阅设置”
+            CreateWindowW(L"BUTTON", L"订阅设置", WS_CHILD | WS_VISIBLE, 270, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_SUB, NULL, NULL);
 
             EnumChildWindows(hWnd, (WNDENUMPROC)(void*)SendMessageW, (LPARAM)hAppFont);
             SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
