@@ -23,11 +23,11 @@
 #ifndef INTERNET_FLAG_IGNORE_CERT_DATE_INVALID
 #define INTERNET_FLAG_IGNORE_CERT_DATE_INVALID 0x00002000
 #endif
-// [新增] 忽略证书吊销检查失败，解决 12157 错误的关键
+// [修复] 新增忽略证书吊销检查失败的宏 (解决 12157 错误)
 #ifndef INTERNET_FLAG_IGNORE_CERT_REV_FAILED
 #define INTERNET_FLAG_IGNORE_CERT_REV_FAILED 0x00800000
 #endif
-// [新增] 忽略未知 CA
+// [修复] 新增忽略未知 CA 的宏
 #ifndef INTERNET_FLAG_IGNORE_UNKNOWN_CA
 #define INTERNET_FLAG_IGNORE_UNKNOWN_CA 0x00000100
 #endif
@@ -205,13 +205,13 @@ static char* InternalDownload(const char* url, BOOL useProxy) {
     InternetSetOption(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     InternetSetOption(hInternet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-    // [修复] 增加 INTERNET_FLAG_IGNORE_CERT_REV_FAILED (吊销检查失败) 和 INTERNET_FLAG_IGNORE_UNKNOWN_CA
+    // [修复] 增加 INTERNET_FLAG_IGNORE_CERT_REV_FAILED (忽略吊销检查失败) 和 INTERNET_FLAG_IGNORE_UNKNOWN_CA
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE | INTERNET_FLAG_PRAGMA_NOCACHE | 
                   INTERNET_FLAG_SECURE | 
                   INTERNET_FLAG_IGNORE_CERT_CN_INVALID | 
                   INTERNET_FLAG_IGNORE_CERT_DATE_INVALID |
-                  INTERNET_FLAG_IGNORE_CERT_REV_FAILED | // 忽略吊销检查失败
-                  INTERNET_FLAG_IGNORE_UNKNOWN_CA |      // 忽略未知CA
+                  INTERNET_FLAG_IGNORE_CERT_REV_FAILED | // 核心修复：忽略吊销检查
+                  INTERNET_FLAG_IGNORE_UNKNOWN_CA |      // 核心修复：忽略未知CA
                   0x00002000;
 
     HINTERNET hConnect = InternetOpenUrlA(hInternet, url, NULL, 0, flags, 0);
