@@ -1,10 +1,97 @@
 #include "config.h"
 #include "utils.h"
 #include "proxy.h" 
-#include <wininet.h> // 需要包含此头文件以支持 WinINet
+#include <stdio.h>
 
-// --- 新增：全局订阅地址变量 ---
-char g_subUrl[512] = "";
+// 全局变量定义
+int g_localPort = 10809;
+int g_hotkeyModifiers = MOD_CONTROL | MOD_ALT;
+int g_hotkeyVk = 'H';
+int g_hideTrayStart = 0;
+
+int g_enableChromeCiphers = 1;
+int g_enableALPN = 1;
+int g_enableFragment = 0;
+int g_fragSizeMin = 5;
+int g_fragSizeMax = 20;
+int g_fragDelayMs = 2;
+int g_enablePadding = 0;
+int g_padSizeMin = 100;
+int g_padSizeMax = 500;
+int g_uaPlatformIndex = 0;
+char g_userAgentStr[512] = "";
+
+wchar_t g_iniFilePath[MAX_PATH];
+struct ProxyConfig g_proxyConfig;
+wchar_t** nodeTags = NULL;
+int nodeCount = 0;
+wchar_t currentNode[64] = {0};
+
+// --- 新增：订阅列表变量 ---
+Subscription g_subs[MAX_SUBS];
+int g_subCount = 0;
+
+// 辅助：清空所有节点 (用于更新时覆盖)
+void ClearAllNodes() {
+    char* buffer = NULL; long size = 0;
+    if (!ReadFileToBuffer(CONFIG_FILE, &buffer, &size)) return;
+    
+    cJSON* root = cJSON_Parse(buffer); free(buffer);
+    if (!root) return;
+
+    cJSON_DeleteItemFromObject(root, "outbounds");
+    cJSON_AddItemToObject(root, "outbounds", cJSON_CreateArray());
+    
+    char* out = cJSON_Print(root);
+    WriteBufferToFile(CONFIG_FILE, out);
+    free(out); cJSON_Delete(root);
+}
+
+// 辅助：解析单个订阅返回的内容并添加到配置
+int ParseAndAppendSubscriptionData(const char* data) {
+    if (!data) return 0;
+    
+    // 尝试 Base64 解码 (绝大多数订阅链接返回的是 Base64 编码的列表)
+    size_t decLen = 0;
+    unsigned char* decoded = Base64Decode(data, &decLen);
+    
+    // 如果解码失败或为空，尝试直接使用原始内容 (兼容明文返回)
+    char* sourceText = NULL;
+    if (decoded && decLen > 0) {
+        sourceText = (char*)decoded;
+    } else {
+        sourceText = strdup(data); 
+        if (decoded) free(decoded);
+    }
+    
+    if (!sourceText) return 0;
+
+    int count = 0;
+    char* context = NULL;
+    // 按行拆分
+    char* line = strtok_s(sourceText, "\r\n ", &context);
+    while (line) {
+        TrimString(line);
+        if (strlen(line) > 0) {
+            cJSON* node = NULL;
+            // 尝试解析各种协议
+            if (_strnicmp(line, "vmess://", 8) == 0) node = ParseVmess(line);
+            else if (_strnicmp(line, "ss://", 5) == 0) node = ParseShadowsocks(line);
+            else if (_strnicmp(line, "vless://", 8) == 0) node = ParseVlessOrTrojan(line);
+            else if (_strnicmp(line, "trojan://", 9) == 0) node = ParseVlessOrTrojan(line);
+            else if (_strnicmp(line, "socks://", 8) == 0) node = ParseSocks(line);
+            
+            if (node) {
+                if (AddNodeToConfig(node)) count++;
+                else cJSON_Delete(node);
+            }
+        }
+        line = strtok_s(NULL, "\r\n ", &context);
+    }
+    
+    free(sourceText);
+    return count;
+}
 
 void LoadSettings() {
     g_hotkeyModifiers = GetPrivateProfileIntW(L"Settings", L"Modifiers", MOD_CONTROL | MOD_ALT, g_iniFilePath);
@@ -12,7 +99,6 @@ void LoadSettings() {
     g_localPort = GetPrivateProfileIntW(L"Settings", L"LocalPort", 10809, g_iniFilePath);
     g_hideTrayStart = GetPrivateProfileIntW(L"Settings", L"HideTray", 0, g_iniFilePath);
     
-    // 抗封锁配置读取
     g_enableChromeCiphers = GetPrivateProfileIntW(L"Settings", L"ChromeCiphers", 1, g_iniFilePath);
     g_enableALPN = GetPrivateProfileIntW(L"Settings", L"EnableALPN", 1, g_iniFilePath);
     g_enableFragment = GetPrivateProfileIntW(L"Settings", L"EnableFragment", 0, g_iniFilePath);
@@ -42,13 +128,18 @@ void LoadSettings() {
         strcpy(g_userAgentStr, UA_TEMPLATES[0]);
     }
 
-    // --- 新增：读取订阅地址 (处理宽字符转 UTF-8) ---
-    wchar_t wSubUrl[512] = {0};
-    GetPrivateProfileStringW(L"Settings", L"SubUrl", L"", wSubUrl, 512, g_iniFilePath);
-    if (wcslen(wSubUrl) > 0) {
-        WideCharToMultiByte(CP_UTF8, 0, wSubUrl, -1, g_subUrl, 512, NULL, NULL);
-    } else {
-        g_subUrl[0] = '\0';
+    // --- 新增：读取订阅列表 ---
+    g_subCount = GetPrivateProfileIntW(L"Subscriptions", L"Count", 0, g_iniFilePath);
+    if (g_subCount > MAX_SUBS) g_subCount = MAX_SUBS;
+    
+    for (int i = 0; i < g_subCount; i++) {
+        wchar_t wKeyEn[32], wKeyUrl[32], wUrl[512];
+        wsprintfW(wKeyEn, L"Sub%d_Enabled", i);
+        wsprintfW(wKeyUrl, L"Sub%d_Url", i);
+        
+        g_subs[i].enabled = GetPrivateProfileIntW(L"Subscriptions", wKeyEn, 1, g_iniFilePath);
+        GetPrivateProfileStringW(L"Subscriptions", wKeyUrl, L"", wUrl, 512, g_iniFilePath);
+        WideCharToMultiByte(CP_UTF8, 0, wUrl, -1, g_subs[i].url, 512, NULL, NULL);
     }
 }
 
@@ -91,10 +182,21 @@ void SaveSettings() {
     MultiByteToWideChar(CP_UTF8, 0, g_userAgentStr, -1, wUABuf, 512);
     WritePrivateProfileStringW(L"Settings", L"UserAgent", wUABuf, g_iniFilePath);
 
-    // --- 新增：保存订阅地址 ---
-    wchar_t wSubUrl[512] = {0};
-    MultiByteToWideChar(CP_UTF8, 0, g_subUrl, -1, wSubUrl, 512);
-    WritePrivateProfileStringW(L"Settings", L"SubUrl", wSubUrl, g_iniFilePath);
+    // --- 新增：保存订阅列表 ---
+    wsprintfW(buffer, L"%d", g_subCount);
+    WritePrivateProfileStringW(L"Subscriptions", L"Count", buffer, g_iniFilePath);
+    
+    for (int i = 0; i < g_subCount; i++) {
+        wchar_t wKeyEn[32], wKeyUrl[32], wUrl[512], wVal[2];
+        wsprintfW(wKeyEn, L"Sub%d_Enabled", i);
+        wsprintfW(wKeyUrl, L"Sub%d_Url", i);
+        
+        wsprintfW(wVal, L"%d", g_subs[i].enabled);
+        WritePrivateProfileStringW(L"Subscriptions", wKeyEn, wVal, g_iniFilePath);
+        
+        MultiByteToWideChar(CP_UTF8, 0, g_subs[i].url, -1, wUrl, 512);
+        WritePrivateProfileStringW(L"Subscriptions", wKeyUrl, wUrl, g_iniFilePath);
+    }
 }
 
 void SetAutorun(BOOL enable) {
@@ -467,81 +569,46 @@ void ToggleTrayIcon() {
     SaveSettings();
 }
 
-// --- 新增：订阅管理核心逻辑 ---
+// --- 新增：更新所有订阅逻辑 ---
+int UpdateAllSubscriptions(BOOL forceMsg) {
+    int totalNewNodes = 0;
+    int activeSubs = 0;
 
-// 清空现有节点
-void ClearAllNodes() {
-    char* buffer = NULL; long size = 0;
-    if (!ReadFileToBuffer(CONFIG_FILE, &buffer, &size)) return;
-    cJSON* root = cJSON_Parse(buffer); free(buffer);
-    if (!root) return;
-    
-    // 移除所有出站节点
-    cJSON_DeleteItemFromObject(root, "outbounds");
-    // 重建空数组
-    cJSON_AddItemToObject(root, "outbounds", cJSON_CreateArray());
-    
-    char* out = cJSON_Print(root);
-    WriteBufferToFile(CONFIG_FILE, out);
-    free(out); cJSON_Delete(root);
-}
-
-// 更新订阅主函数
-// 1. 下载 -> 2. 解码 -> 3. 清空旧节点 -> 4. 逐行解析并添加 -> 5. 刷新
-int UpdateNodesFromSubscription(const char* url) {
-    if (!url || strlen(url) < 4) return -1;
-    
-    log_msg("[Sub] Downloading from: %s", url);
-    char* data = Utils_HttpGet(url);
-    if (!data) {
-        log_msg("[Sub] Download failed.");
-        return -1;
+    // 统计有效订阅
+    for(int i=0; i<g_subCount; i++) {
+        if(g_subs[i].enabled && strlen(g_subs[i].url) > 4) activeSubs++;
     }
 
-    // 订阅内容通常是 Base64 编码的列表
-    size_t decLen = 0;
-    unsigned char* decoded = Base64Decode(data, &decLen);
-    
-    // 如果解码失败，可能返回的就是明文，或者是不支持的格式
-    // 尝试使用解码后的内容，如果解码为空，则使用原始内容
-    char* sourceText = NULL;
-    if (decoded) {
-        sourceText = (char*)decoded;
-    } else {
-        sourceText = strdup(data); 
+    if (activeSubs == 0) {
+        if (forceMsg) log_msg("[Sub] No active subscriptions found.");
+        return 0;
     }
-    free(data); // 释放原始下载数据
 
-    if (!sourceText) return -1;
+    log_msg("[Sub] Starting update for %d subscriptions...", activeSubs);
 
-    // 清空旧节点 (覆盖模式)
+    // 1. 清空旧节点 (策略：更新 = 全量覆盖)
     ClearAllNodes();
 
-    int successCount = 0;
-    char* context = NULL;
-    // 按行拆分，支持 \r \n 和空格
-    char* line = strtok_s(sourceText, "\r\n ", &context);
-    
-    while (line != NULL) {
-        TrimString(line);
-        if (strlen(line) > 0) {
-            cJSON* node = NULL;
-            // 尝试各种协议解析
-            if (_strnicmp(line, "vmess://", 8) == 0) node = ParseVmess(line);
-            else if (_strnicmp(line, "ss://", 5) == 0) node = ParseShadowsocks(line);
-            else if (_strnicmp(line, "vless://", 8) == 0) node = ParseVlessOrTrojan(line);
-            else if (_strnicmp(line, "trojan://", 9) == 0) node = ParseVlessOrTrojan(line);
-            else if (_strnicmp(line, "socks://", 8) == 0) node = ParseSocks(line);
-
-            if (node) {
-                if (AddNodeToConfig(node)) successCount++;
-                else cJSON_Delete(node); // 添加失败则释放
+    // 2. 遍历下载并解析
+    for (int i = 0; i < g_subCount; i++) {
+        if (g_subs[i].enabled && strlen(g_subs[i].url) > 4) {
+            log_msg("[Sub] Downloading (%d/%d): %s", i+1, g_subCount, g_subs[i].url);
+            
+            // 使用带超时功能的下载函数
+            char* data = Utils_HttpGet(g_subs[i].url);
+            
+            if (data) {
+                int count = ParseAndAppendSubscriptionData(data);
+                log_msg("[Sub] Parsed %d nodes from %s", count, g_subs[i].url);
+                totalNewNodes += count;
+                free(data);
+            } else {
+                log_msg("[Sub] Download failed (timeout or network error): %s", g_subs[i].url);
             }
         }
-        line = strtok_s(NULL, "\r\n ", &context);
     }
-    
-    free(sourceText);
-    ParseTags(); // 刷新内存中的标签列表，确保 GUI 能读到新节点
-    return successCount;
+
+    // 3. 刷新内存
+    ParseTags();
+    return totalNewNodes;
 }
