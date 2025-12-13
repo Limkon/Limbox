@@ -1,33 +1,21 @@
 #include "utils.h"
 #include <stdio.h>
-#include <wininet.h>
+#include <stdlib.h>
+#include <string.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include "crypto.h" // 确保包含 crypto.h 以使用 OpenSSL 头文件
 
-// 链接 wininet 库
+// 链接 Winsock 库
 #ifdef _MSC_VER
-#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "ws2_32.lib")
 #endif
-
-// --- 宏定义补充 ---
-#ifndef INTERNET_OPTION_SECURE_PROTOCOLS
-#define INTERNET_OPTION_SECURE_PROTOCOLS 136
-#endif
-#ifndef SP_PROT_TLS1_2_CLIENT
-#define SP_PROT_TLS1_2_CLIENT 0x00000800
-#endif
-#ifndef SP_PROT_TLS1_3_CLIENT
-#define SP_PROT_TLS1_3_CLIENT 0x00002000
-#endif
-
-// 定义所有需要忽略的安全标志
-#define SECURITY_FLAGS_IGNORE_ALL (\
-    SECURITY_FLAG_IGNORE_REVOCATION |\
-    SECURITY_FLAG_IGNORE_UNKNOWN_CA |\
-    SECURITY_FLAG_IGNORE_CERT_CN_INVALID |\
-    SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |\
-    SECURITY_FLAG_IGNORE_WRONG_USAGE)
 
 extern int g_localPort; // 引用全局端口变量
 
+// --- 日志函数 ---
 void log_msg(const char *format, ...) {
     char buf[2048]; char time_buf[64]; SYSTEMTIME st; GetLocalTime(&st);
     sprintf(time_buf, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
@@ -50,6 +38,7 @@ void log_wsa_error(const char* context) {
     log_msg("[Error] %s Failed. Code: %d", context, err);
 }
 
+// --- 文件操作 ---
 BOOL ReadFileToBuffer(const wchar_t* filename, char** buffer, long* fileSize) {
     FILE* f = NULL;
     if (_wfopen_s(&f, filename, L"rb") != 0 || !f) { *fileSize=0; return FALSE; }
@@ -69,7 +58,42 @@ BOOL WriteBufferToFile(const wchar_t* filename, const char* buffer) {
     fclose(f); return TRUE;
 }
 
-// Base64 辅助
+// --- 字符串处理 ---
+void TrimString(char* str) {
+    if(!str) return;
+    char* p = str; while(isspace((unsigned char)*p)) p++;
+    if(p != str) memmove(str, p, strlen(p)+1);
+    size_t len = strlen(str); while(len > 0 && isspace((unsigned char)str[len-1])) str[--len] = 0;
+}
+
+void UrlDecode(char* dst, const char* src) {
+    char a, b;
+    while (*src) {
+        if ((*src == '%') && ((a = src[1]) && (b = src[2])) && (isxdigit(a) && isxdigit(b))) {
+            if (a >= 'a') a -= 'a' - 'A'; else if (a >= 'A') a -= ('A' - 10); else a -= '0';
+            if (b >= 'a') b -= 'a' - 'A'; else if (b >= 'A') b -= ('A' - 10); else b -= '0';
+            *dst++ = 16 * a + b; src += 3;
+        } else if (*src == '+') { *dst++ = ' '; src++; } else { *dst++ = *src++; }
+    }
+    *dst = '\0';
+}
+
+char* GetQueryParam(const char* query, const char* key) {
+    if (!query || !key) return NULL;
+    char keyEq[128]; snprintf(keyEq, sizeof(keyEq), "%s=", key);
+    const char* start = strstr(query, keyEq);
+    if (!start) return NULL;
+    if (start != query && *(start - 1) != '&' && *(start - 1) != '?') return GetQueryParam(start + 1, key); 
+    start += strlen(keyEq);
+    const char* end = strchr(start, '&');
+    size_t len = end ? (size_t)(end - start) : strlen(start);
+    if (len == 0) return NULL;
+    char* value = (char*)malloc(len + 1); strncpy(value, start, len); value[len] = '\0';
+    char* decoded = (char*)malloc(len + 1); UrlDecode(decoded, value); free(value);
+    return decoded;
+}
+
+// --- Base64 ---
 static int GetBase64Val(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -109,25 +133,6 @@ unsigned char* Base64Decode(const char* src, size_t* out_len) {
     out[j] = '\0'; *out_len = j; return out;
 }
 
-void UrlDecode(char* dst, const char* src) {
-    char a, b;
-    while (*src) {
-        if ((*src == '%') && ((a = src[1]) && (b = src[2])) && (isxdigit(a) && isxdigit(b))) {
-            if (a >= 'a') a -= 'a' - 'A'; else if (a >= 'A') a -= ('A' - 10); else a -= '0';
-            if (b >= 'a') b -= 'a' - 'A'; else if (b >= 'A') b -= ('A' - 10); else b -= '0';
-            *dst++ = 16 * a + b; src += 3;
-        } else if (*src == '+') { *dst++ = ' '; src++; } else { *dst++ = *src++; }
-    }
-    *dst = '\0';
-}
-
-void TrimString(char* str) {
-    if(!str) return;
-    char* p = str; while(isspace((unsigned char)*p)) p++;
-    if(p != str) memmove(str, p, strlen(p)+1);
-    size_t len = strlen(str); while(len > 0 && isspace((unsigned char)str[len-1])) str[--len] = 0;
-}
-
 char* GetClipboardText() {
     if (!OpenClipboard(NULL)) return NULL;
     HANDLE hData = GetClipboardData(CF_UNICODETEXT);
@@ -157,27 +162,11 @@ char* GetClipboardText() {
     CloseClipboard(); return NULL;
 }
 
-char* GetQueryParam(const char* query, const char* key) {
-    if (!query || !key) return NULL;
-    char keyEq[128]; snprintf(keyEq, sizeof(keyEq), "%s=", key);
-    const char* start = strstr(query, keyEq);
-    if (!start) return NULL;
-    if (start != query && *(start - 1) != '&' && *(start - 1) != '?') return GetQueryParam(start + 1, key); 
-    start += strlen(keyEq);
-    const char* end = strchr(start, '&');
-    size_t len = end ? (size_t)(end - start) : strlen(start);
-    if (len == 0) return NULL;
-    char* value = (char*)malloc(len + 1); strncpy(value, start, len); value[len] = '\0';
-    char* decoded = (char*)malloc(len + 1); UrlDecode(decoded, value); free(value);
-    return decoded;
-}
-
-// --- 简单的 URL 解析 ---
+// --- URL 解析结构 ---
 typedef struct {
     char host[256];
-    char path[1024];
+    char path[2048];
     int port;
-    int is_https;
 } URL_COMPONENTS_SIMPLE;
 
 static BOOL ParseUrl(const char* url, URL_COMPONENTS_SIMPLE* out) {
@@ -185,28 +174,25 @@ static BOOL ParseUrl(const char* url, URL_COMPONENTS_SIMPLE* out) {
     memset(out, 0, sizeof(URL_COMPONENTS_SIMPLE));
     
     const char* p = url;
-    if (strncmp(p, "https://", 8) == 0) { out->is_https = 1; out->port = 443; p += 8; }
-    else if (strncmp(p, "http://", 7) == 0) { out->is_https = 0; out->port = 80; p += 7; }
-    else return FALSE;
+    if (strncmp(p, "https://", 8) == 0) { out->port = 443; p += 8; }
+    else if (strncmp(p, "http://", 7) == 0) { out->port = 80; p += 7; }
+    else return FALSE; // Only support HTTP/HTTPS
 
-    // Extract host
+    // Host
     const char* slash = strchr(p, '/');
-    int hostLen = 0;
-    if (slash) hostLen = (int)(slash - p);
-    else hostLen = (int)strlen(p);
-
+    int hostLen = (slash) ? (int)(slash - p) : (int)strlen(p);
     if (hostLen >= sizeof(out->host)) return FALSE;
     strncpy(out->host, p, hostLen);
     out->host[hostLen] = '\0';
 
-    // Check for port in host
+    // Port in host
     char* colon = strchr(out->host, ':');
     if (colon) {
         *colon = '\0';
         out->port = atoi(colon + 1);
     }
 
-    // Extract path
+    // Path
     if (slash) {
         if (strlen(slash) >= sizeof(out->path)) return FALSE;
         strcpy(out->path, slash);
@@ -216,148 +202,179 @@ static BOOL ParseUrl(const char* url, URL_COMPONENTS_SIMPLE* out) {
     return TRUE;
 }
 
-// --- 内部下载实现 (重构版：完整 HttpSendRequest 流程) ---
-static char* InternalDownload(const char* url, BOOL useProxy) {
-    URL_COMPONENTS_SIMPLE urlComp;
-    if (!ParseUrl(url, &urlComp)) {
-        log_msg("[Utils] Invalid URL: %s", url);
+// --- OpenSSL 下载核心实现 ---
+static char* InternalHttpsGet(const char* url, BOOL useProxy) {
+    URL_COMPONENTS_SIMPLE u;
+    if (!ParseUrl(url, &u)) { log_msg("[Utils] Invalid URL: %s", url); return NULL; }
+
+    // 初始化 OpenSSL (如果尚未初始化)
+    static int ssl_inited = 0;
+    if (!ssl_inited) {
+        SSL_library_init();
+        OpenSSL_add_all_algorithms();
+        SSL_load_error_strings();
+        ssl_inited = 1;
+    }
+
+    SOCKET s = INVALID_SOCKET;
+    SSL_CTX *ctx = NULL;
+    SSL *ssl = NULL;
+    char* result = NULL;
+
+    // 1. 建立 TCP 连接
+    const char* targetHost = useProxy ? "127.0.0.1" : u.host;
+    int targetPort = useProxy ? g_localPort : u.port;
+
+    if (useProxy) log_msg("[Utils] Connecting via Proxy: %s:%d", targetHost, targetPort);
+    else log_msg("[Utils] Connecting DIRECT to: %s:%d", targetHost, targetPort);
+
+    struct hostent *he = gethostbyname(targetHost);
+    if (!he) { log_msg("[Utils] DNS resolution failed for %s", targetHost); return NULL; }
+
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCKET) return NULL;
+
+    // 设置超时
+    DWORD timeout = 10000; 
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(targetPort);
+    addr.sin_addr = *((struct in_addr *)he->h_addr);
+
+    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+        log_wsa_error("Socket Connect");
+        closesocket(s);
         return NULL;
     }
 
-    const char* ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-    HINTERNET hInternet = NULL;
-    HINTERNET hConnect = NULL;
-    HINTERNET hRequest = NULL;
-    char* buffer = NULL;
+    // 2. 如果是代理，发送 HTTP CONNECT
+    if (useProxy) {
+        char connectReq[512];
+        snprintf(connectReq, sizeof(connectReq), 
+            "CONNECT %s:%d HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
+            "\r\n", 
+            u.host, u.port, u.host, u.port);
+        
+        send(s, connectReq, (int)strlen(connectReq), 0);
 
-    // 1. 初始化 WinINet
-    if (useProxy && g_localPort > 0) {
-        char proxyStr[64];
-        sprintf(proxyStr, "127.0.0.1:%d", g_localPort);
-        hInternet = InternetOpenA(ua, INTERNET_OPEN_TYPE_PROXY, proxyStr, NULL, 0);
-        log_msg("[Utils] Downloading via PROXY: %s", proxyStr);
-    } else {
-        hInternet = InternetOpenA(ua, INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
-        log_msg("[Utils] Downloading via DIRECT connection.");
-    }
-
-    if (!hInternet) return NULL;
-
-    // 强制 TLS 1.2/1.3
-    DWORD secure_protocols = SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT | 0x00000080;
-    InternetSetOption(hInternet, INTERNET_OPTION_SECURE_PROTOCOLS, &secure_protocols, sizeof(secure_protocols));
-
-    // 设置超时 (15s)
-    DWORD timeout = 15000;
-    InternetSetOption(hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
-    InternetSetOption(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
-    InternetSetOption(hInternet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
-
-    // 2. 连接服务器
-    hConnect = InternetConnectA(hInternet, urlComp.host, urlComp.port, NULL, NULL, INTERNET_SERVICE_HTTP, 0, 0);
-    if (!hConnect) {
-        log_msg("[Utils] InternetConnect failed. Error: %d", GetLastError());
-        goto cleanup;
-    }
-
-    // 3. 创建请求
-    DWORD reqFlags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE | INTERNET_FLAG_PRAGMA_NOCACHE | INTERNET_FLAG_KEEP_CONNECTION;
-    if (urlComp.is_https) {
-        reqFlags |= INTERNET_FLAG_SECURE;
-        // 初始标志中也加入忽略标志，虽然可能不够，但加上无妨
-        reqFlags |= (INTERNET_FLAG_IGNORE_CERT_CN_INVALID | INTERNET_FLAG_IGNORE_CERT_DATE_INVALID);
-    }
-
-    hRequest = HttpOpenRequestA(hConnect, "GET", urlComp.path, NULL, NULL, NULL, reqFlags, 0);
-    if (!hRequest) {
-        log_msg("[Utils] HttpOpenRequest failed. Error: %d", GetLastError());
-        goto cleanup;
-    }
-
-    // 4. 发送请求 (带重试逻辑)
-    BOOL sent = FALSE;
-    int retryCount = 0;
-    while (retryCount < 3) {
-        sent = HttpSendRequestA(hRequest, NULL, 0, NULL, 0);
-        if (sent) break;
-
-        DWORD err = GetLastError();
-        // 检查是否为 SSL 错误 (12157, 12057 等)
-        if (err == ERROR_INTERNET_INVALID_CA || 
-            err == ERROR_INTERNET_SEC_CERT_CN_INVALID || 
-            err == ERROR_INTERNET_SEC_CERT_DATE_INVALID ||
-            err == ERROR_INTERNET_SEC_CERT_ERRORS ||
-            err == ERROR_INTERNET_SECURITY_CHANNEL_ERROR || // 12157
-            err == ERROR_INTERNET_SEC_CERT_REV_FAILED) { 
-            
-            log_msg("[Utils] SSL Error %d encountered. Attempting to ignore...", err);
-            
-            // 核心修复：显式忽略安全设置并重试
-            DWORD dwFlags = 0;
-            DWORD dwBuffLen = sizeof(dwFlags);
-            InternetQueryOption(hRequest, INTERNET_OPTION_SECURITY_FLAGS, (LPVOID)&dwFlags, &dwBuffLen);
-            dwFlags |= SECURITY_FLAGS_IGNORE_ALL;
-            if (!InternetSetOption(hRequest, INTERNET_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags))) {
-                 log_msg("[Utils] Failed to set security options. Error: %d", GetLastError());
-                 break;
-            }
-            retryCount++;
-        } else {
-            log_msg("[Utils] HttpSendRequest failed with non-SSL error: %d", err);
-            break;
+        char buf[1024];
+        int n = recv(s, buf, sizeof(buf)-1, 0);
+        if (n <= 0) { log_msg("[Utils] Proxy handshake failed (recv)"); closesocket(s); return NULL; }
+        buf[n] = 0;
+        if (!strstr(buf, "200 Connection Established")) {
+            log_msg("[Utils] Proxy handshake failed. Response: %s", buf);
+            closesocket(s);
+            return NULL;
         }
     }
 
-    if (!sent) goto cleanup;
-
-    // 5. 读取数据
-    // 先查询 Content-Length (可选，用于优化内存分配)
-    DWORD contentLength = 0;
-    DWORD lenSize = sizeof(contentLength);
-    // HttpQueryInfoA(hRequest, HTTP_QUERY_CONTENT_LENGTH | HTTP_QUERY_FLAG_NUMBER, &contentLength, &lenSize, NULL);
-
-    DWORD bufferSize = (contentLength > 0) ? (contentLength + 1024) : 32768;
-    buffer = (char*)malloc(bufferSize);
-    if (!buffer) goto cleanup;
-    buffer[0] = '\0';
+    // 3. SSL 握手 (彻底解决 12157)
+    ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) { closesocket(s); return NULL; }
     
-    DWORD totalRead = 0;
-    DWORD bytesRead = 0;
-    while (InternetReadFile(hRequest, buffer + totalRead, 8192, &bytesRead) && bytesRead > 0) {
-        totalRead += bytesRead;
-        if (totalRead + 8192 >= bufferSize) {
-            bufferSize *= 2;
-            char* newBuf = (char*)realloc(buffer, bufferSize);
-            if (!newBuf) { 
-                free(buffer); buffer = NULL; goto cleanup; 
-            }
-            buffer = newBuf;
-        }
+    // [关键] 禁用证书验证
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, (int)s);
+
+    // [关键] 设置 SNI (GitHub 需要)
+    SSL_set_tlsext_host_name(ssl, u.host);
+
+    if (SSL_connect(ssl) != 1) {
+        log_msg("[Utils] SSL Handshake Failed. (OpenSSL error)");
+        ERR_print_errors_fp(stderr);
+        goto cleanup;
     }
-    buffer[totalRead] = '\0';
+
+    // 4. 发送 HTTP GET
+    char request[4096];
+    snprintf(request, sizeof(request),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: Mandala/1.0\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        u.path, u.host);
+    
+    if (SSL_write(ssl, request, (int)strlen(request)) <= 0) goto cleanup;
+
+    // 5. 读取响应
+    // 简单实现：读取所有数据，然后解析 Header
+    int buffer_size = 65536; // 初始 64KB
+    int total_read = 0;
+    char* resp_buf = (char*)malloc(buffer_size);
+    if(!resp_buf) goto cleanup;
+
+    while (1) {
+        if (total_read + 4096 >= buffer_size) {
+            buffer_size *= 2;
+            char* new_buf = (char*)realloc(resp_buf, buffer_size);
+            if (!new_buf) { free(resp_buf); resp_buf=NULL; goto cleanup; }
+            resp_buf = new_buf;
+        }
+        int r = SSL_read(ssl, resp_buf + total_read, 4096);
+        if (r <= 0) break; // 连接关闭或错误
+        total_read += r;
+    }
+    resp_buf[total_read] = 0;
+
+    // 6. 解析 HTTP 响应
+    // 查找 header 结束标记
+    char* body_start = strstr(resp_buf, "\r\n\r\n");
+    if (!body_start) {
+        // 尝试只找 \n\n
+        body_start = strstr(resp_buf, "\n\n");
+    }
+
+    if (body_start) {
+        // 移动指针跳过空行
+        if (body_start[0] == '\r') body_start += 4;
+        else body_start += 2;
+
+        // 计算 Body 长度
+        int header_len = (int)(body_start - resp_buf);
+        int body_len = total_read - header_len;
+        
+        // 复制 Body 到新 buffer
+        result = (char*)malloc(body_len + 1);
+        memcpy(result, body_start, body_len);
+        result[body_len] = 0;
+    } else {
+        // 没找到 Header？可能整个都是 Body 或者出错
+        log_msg("[Utils] Invalid HTTP response format");
+    }
+
+    free(resp_buf); // 释放原始接收缓冲
 
 cleanup:
-    if (hRequest) InternetCloseHandle(hRequest);
-    if (hConnect) InternetCloseHandle(hConnect);
-    if (hInternet) InternetCloseHandle(hInternet);
-    return buffer;
+    if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
+    if (ctx) SSL_CTX_free(ctx);
+    if (s != INVALID_SOCKET) closesocket(s);
+    return result;
 }
 
-// --- 公开下载接口 (混合模式) ---
+// --- 公开下载接口 ---
 char* Utils_HttpGet(const char* url) {
     if (!url) return NULL;
     
     // 1. 优先尝试走本地代理
     if (g_localPort > 0) {
-        char* res = InternalDownload(url, TRUE);
+        char* res = InternalHttpsGet(url, TRUE);
         if (res) return res;
         log_msg("[Utils] Proxy download failed, falling back to DIRECT mode...");
     }
 
     // 2. 尝试直连
-    return InternalDownload(url, FALSE);
+    return InternalHttpsGet(url, FALSE);
 }
 
+// --- Windows 代理设置 (保留原功能) ---
 BOOL IsWindows8OrGreater() {
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
     if (hKernel32 == NULL) return FALSE;
