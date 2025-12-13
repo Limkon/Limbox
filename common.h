@@ -8,15 +8,8 @@
 #define _UNICODE
 #endif
 
-// [修复] 增加宏定义检查，消除编译警告
-#ifndef _WIN32_IE
 #define _WIN32_IE 0x0601
-#endif
-
-#ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0601
-#endif
-
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
@@ -43,18 +36,17 @@
 // cJSON Header
 #include "cJSON.h"
 
-// --- 基础宏定义 ---
+// --- 宏定义 ---
 #define REG_PATH_PROXY L"Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"
 #define CONFIG_FILE L"config.json"
-#define BUFFER_SIZE 131072  // 保持较大的缓冲区
-#define MAX_SUBS 20         // [恢复] 订阅最大数量
+#define BUFFER_SIZE 131072 
 
-// --- Windows 消息 ID ---
+// Windows Messages
 #define WM_TRAY (WM_USER + 1)
 #define WM_LOG_UPDATE (WM_USER + 2)
 #define WM_REFRESH_NODELIST (WM_USER + 50)
 
-// --- 控件与菜单 ID ---
+// Command IDs
 #define ID_TRAY_EXIT 1001
 #define ID_TRAY_AUTORUN 1002
 #define ID_TRAY_SYSTEM_PROXY 1003
@@ -66,7 +58,7 @@
 #define ID_GLOBAL_HOTKEY 9001
 #define ID_TRAY_NODE_BASE 2000
 
-// 日志与列表 ID
+// GUI Control IDs
 #define ID_LOGVIEWER_EDIT 6001
 #define ID_NODEMGR_LIST 3001
 #define ID_NODEMGR_DEL 3002
@@ -74,7 +66,7 @@
 #define ID_HOTKEY_CTRL 7001 
 #define ID_PORT_EDIT 7002
 
-// 设置界面 ID (抗封锁相关)
+// Settings GUI IDs
 #define ID_CHK_CIPHERS    7010
 #define ID_CHK_ALPN       7011
 #define ID_COMBO_PLATFORM 7012 
@@ -87,7 +79,7 @@
 #define ID_EDIT_PAD_MIN   7020
 #define ID_EDIT_PAD_MAX   7021
 
-// 节点编辑 ID
+// Node Edit IDs
 #define ID_EDIT_TAG      8001
 #define ID_EDIT_ADDR     8002
 #define ID_EDIT_PORT     8003
@@ -100,14 +92,11 @@
 #define ID_EDIT_TLS      8010
 
 // --- 结构体定义 ---
-
-// [核心修复] TLSContext 定义保留在此处
 typedef struct { 
     SOCKET sock; 
     SSL *ssl; 
 } TLSContext;
 
-// 代理配置结构
 typedef struct {
     char host[256]; 
     int port; 
@@ -117,15 +106,7 @@ typedef struct {
     char pass[128];
 } ProxyConfig;
 
-// [恢复] 订阅结构体 (之前缺失的部分)
-typedef struct {
-    char url[512];
-    BOOL enabled;
-} Subscription;
-
 // --- 全局变量声明 (extern) ---
-
-// 核心全局变量
 extern ProxyConfig g_proxyConfig;
 extern volatile BOOL g_proxyRunning;
 extern SOCKET g_listen_sock;
@@ -151,11 +132,7 @@ extern WNDPROC g_oldListBoxProc;
 extern int g_nEditScrollPos;
 extern int g_nEditContentHeight;
 
-// [恢复] 订阅相关全局变量
-extern Subscription g_subs[MAX_SUBS];
-extern int g_subCount;
-
-// 抗封锁配置全局变量
+// 抗封锁配置
 extern BOOL g_enableChromeCiphers;
 extern BOOL g_enableALPN;
 extern BOOL g_enableFragment;

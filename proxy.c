@@ -2,9 +2,6 @@
 #include "crypto.h"
 #include "utils.h"
 
-// 缓冲区保持 64KB 以应对下载
-#define PROXY_BUF_SIZE 65536 
-
 int recv_timeout(SOCKET s, char *buf, int len, int timeout_sec) {
     fd_set fds; FD_ZERO(&fds); FD_SET(s, &fds);
     struct timeval tv = { timeout_sec, 0 };
@@ -28,23 +25,19 @@ int send_all(SOCKET s, const char *buf, int len) {
 }
 
 DWORD WINAPI client_handler(LPVOID p) {
-    SOCKET c = (SOCKET)(UINT_PTR)p; 
-    TLSContext tls; memset(&tls, 0, sizeof(tls));
+    SOCKET c = (SOCKET)(UINT_PTR)p; TLSContext tls; memset(&tls, 0, sizeof(tls));
     SOCKET r = INVALID_SOCKET;      
-    
-    char *c_buf = (char*)malloc(PROXY_BUF_SIZE); 
-    char *ws_read_buf = (char*)malloc(PROXY_BUF_SIZE); 
-    char *ws_send_buf = (char*)malloc(PROXY_BUF_SIZE + 128);
+    // [优化] ws_send_buf 增大 128 字节，防止 WebSocket 封包头溢出
+    char *c_buf = (char*)malloc(BUFFER_SIZE); 
+    char *ws_read_buf = (char*)malloc(BUFFER_SIZE); 
+    char *ws_send_buf = (char*)malloc(BUFFER_SIZE + 128);
 
     if (!c_buf || !ws_read_buf || !ws_send_buf) { goto cl_end; }
     int ws_buf_len = 0; int flag = 1; 
     setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
-    
-    // 1. 读取浏览器请求 (Connect or Get)
-    int browser_len = recv_timeout(c, c_buf, PROXY_BUF_SIZE, 10);
+    int browser_len = recv_timeout(c, c_buf, BUFFER_SIZE, 10);
     if (browser_len <= 0) goto cl_end;
     c_buf[browser_len] = 0;
-    
     char method[16], host[256]; int port = 80; int is_connect_method = 0;
     if (c_buf[0] == 0x05) { send(c, "\x05\x00", 2, 0); goto cl_end; } 
     else {
@@ -56,60 +49,21 @@ DWORD WINAPI client_handler(LPVOID p) {
         } else { goto cl_end; }
     }
     log_msg("[Access] %s %s:%d", method, host, port);
-    
     struct hostent *h = gethostbyname(g_proxyConfig.host);
     if(!h) { log_msg("[DNS] Fail"); goto cl_end; }
+    r = socket(AF_INET, SOCK_STREAM, 0);
+    if (r == INVALID_SOCKET) goto cl_end;
+    setsockopt(r, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
+    struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET; a.sin_port = htons((unsigned short)g_proxyConfig.port);
+    a.sin_addr = *(struct in_addr*)h->h_addr;
+    if (connect(r, (struct sockaddr*)&a, sizeof(a)) != 0) { log_wsa_error("TCP Connect"); goto cl_end; }
+    tls.sock = r;
     
-    // --- 智能重试循环 (Smart Retry Loop) ---
-    // 默认尝试 1 次。如果开启了分片功能，允许最多 2 次尝试。
-    // 第 1 次：温和模式 (Config)
-    // 第 2 次：强力模式 (Aggressive)
-    int max_retries = g_enableFragment ? 2 : 1;
-    int connect_success = 0;
-
-    for (int try_count = 0; try_count < max_retries; try_count++) {
-        // 创建新 Socket
-        r = socket(AF_INET, SOCK_STREAM, 0);
-        if (r == INVALID_SOCKET) break;
-        setsockopt(r, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
-        
-        struct sockaddr_in a; memset(&a, 0, sizeof(a)); a.sin_family = AF_INET; a.sin_port = htons((unsigned short)g_proxyConfig.port);
-        a.sin_addr = *(struct in_addr*)h->h_addr;
-        
-        // TCP 连接
-        if (connect(r, (struct sockaddr*)&a, sizeof(a)) != 0) { 
-            // 如果 TCP 都连不上，通常是 IP 被封或网络问题，重试分片没意义
-            log_wsa_error("TCP Connect"); 
-            closesocket(r); r = INVALID_SOCKET;
-            break; 
-        }
-        
-        tls.sock = r;
-        
-        // TLS 握手 (传入当前的重试次数作为 mode)
-        // try_count 0 = 温和, try_count 1 = 强力
-        if (tls_init_connect(&tls, try_count) == 0) {
-            connect_success = 1;
-            break; // 握手成功，跳出循环
-        } else {
-            // 握手失败
-            log_msg("[TLS] Handshake failed (Mode %d). Retrying...", try_count);
-            tls_close(&tls);
-            closesocket(r); r = INVALID_SOCKET;
-            // 继续下一次循环
-        }
-    }
-
-    if (!connect_success) {
-        log_msg("[Error] All connection attempts failed.");
-        goto cl_end;
-    }
-    
-    // --- 连接建立成功，后续逻辑保持不变 ---
+    if (tls_init_connect(&tls) != 0) goto cl_end;
     
     const char* sni_val = (strlen(g_proxyConfig.sni) > 0) ? g_proxyConfig.sni : g_proxyConfig.host;
 
-    int offset = snprintf(ws_send_buf, PROXY_BUF_SIZE, 
+    int offset = snprintf(ws_send_buf, BUFFER_SIZE, 
         "GET %s HTTP/1.1\r\n"
         "Host: %s\r\n"
         "User-Agent: %s\r\n"
@@ -121,14 +75,12 @@ DWORD WINAPI client_handler(LPVOID p) {
 
     tls_write(&tls, ws_send_buf, offset);
 
-    int len = tls_read(&tls, ws_read_buf, PROXY_BUF_SIZE-1);
+    int len = tls_read(&tls, ws_read_buf, BUFFER_SIZE-1);
     if (len <= 0 || !strstr(ws_read_buf, "101 Switching Protocols")) { log_msg("[WS Error] Handshake failed"); goto cl_end; }
-    
     char auth[] = {0x05, 0x01, 0x00};
     if (strlen(g_proxyConfig.user) > 0) auth[2] = 0x02;
     int flen = build_ws_frame(auth, 3, ws_send_buf);
     tls_write(&tls, ws_send_buf, flen);
-    
     char resp_buf[256];
     if (ws_read_payload_exact(&tls, resp_buf, 2) < 2) goto cl_end;
     if (resp_buf[1] == 0x02) {
@@ -140,7 +92,6 @@ DWORD WINAPI client_handler(LPVOID p) {
         if (ws_read_payload_exact(&tls, resp_buf, 2) < 2) goto cl_end; 
         if (resp_buf[1] != 0x00) goto cl_end;
     }
-    
     unsigned char socks_req[512]; int slen = 0;
     socks_req[slen++] = 0x05; socks_req[slen++] = 0x01; socks_req[slen++] = 0x00; socks_req[slen++] = 0x03;
     socks_req[slen++] = (unsigned char)strlen(host);
@@ -148,9 +99,7 @@ DWORD WINAPI client_handler(LPVOID p) {
     socks_req[slen++] = (port >> 8) & 0xFF; socks_req[slen++] = port & 0xFF;
     flen = build_ws_frame((char*)socks_req, slen, ws_send_buf);
     tls_write(&tls, ws_send_buf, flen);
-    
     if (ws_read_payload_exact(&tls, resp_buf, 4) < 4 || resp_buf[1] != 0x00) goto cl_end;
-    
     if (is_connect_method) {
         const char *ok = "HTTP/1.1 200 Connection Established\r\n\r\n";
         send(c, ok, strlen(ok), 0);
@@ -158,36 +107,30 @@ DWORD WINAPI client_handler(LPVOID p) {
         flen = build_ws_frame(c_buf, browser_len, ws_send_buf);
         tls_write(&tls, ws_send_buf, flen);
     }
-    
     fd_set fds; struct timeval tv; u_long mode = 1;
     ioctlsocket(c, FIONBIO, &mode); ioctlsocket(r, FIONBIO, &mode);
     ws_buf_len = 0; int hl, pl, frame_total;
-    
     while(1) {
         FD_ZERO(&fds); FD_SET(c, &fds); FD_SET(r, &fds);
         int pending = SSL_pending(tls.ssl);
         tv.tv_sec = 1; tv.tv_usec = 0;
         if (pending > 0 || ws_buf_len > 0) { tv.tv_sec = 0; tv.tv_usec = 0; }
-        
         int n = select(0, &fds, NULL, NULL, &tv);
         if (n < 0) break;
-        
         if (FD_ISSET(c, &fds)) {
-            len = recv(c, c_buf, PROXY_BUF_SIZE, 0);
+            len = recv(c, c_buf, BUFFER_SIZE, 0);
             if (len > 0) {
                 flen = build_ws_frame(c_buf, len, ws_send_buf);
                 if (tls_write(&tls, ws_send_buf, flen) < 0) break;
             } else if (WSAGetLastError() != WSAEWOULDBLOCK) break;
         }
-        
         if (FD_ISSET(r, &fds) || pending > 0) {
-            if (ws_buf_len < PROXY_BUF_SIZE) {
-                len = tls_read(&tls, ws_read_buf + ws_buf_len, PROXY_BUF_SIZE - ws_buf_len);
+            if (ws_buf_len < BUFFER_SIZE) {
+                len = tls_read(&tls, ws_read_buf + ws_buf_len, BUFFER_SIZE - ws_buf_len);
                 if (len > 0) ws_buf_len += len;
                 else if (len == -1) break; 
             }
         }
-        
         while (ws_buf_len > 0) {
             frame_total = check_ws_frame((unsigned char*)ws_read_buf, ws_buf_len, &hl, &pl);
             if (frame_total > 0) {
@@ -199,7 +142,7 @@ DWORD WINAPI client_handler(LPVOID p) {
                 memmove(ws_read_buf, ws_read_buf + frame_total, ws_buf_len - frame_total);
                 ws_buf_len -= frame_total;
             } else { 
-                if (ws_buf_len >= PROXY_BUF_SIZE) goto cl_end;
+                if (ws_buf_len >= BUFFER_SIZE) goto cl_end;
                 break; 
             }
         }

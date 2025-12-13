@@ -1,19 +1,9 @@
 #include "crypto.h"
 #include "utils.h"
-#include <stdlib.h>
 
 // ---------------------- BIO Fragmentation Implementation ----------------------
-
-// 定义 BIO 控制命令，用于传递分片参数
-#define BIO_C_SET_FRAG_CONFIG 101
-
-// 分片配置上下文结构体
 typedef struct {
-    int max_splits;        // 最大分片次数 (超过此次数后不再分片)
-    int min_size;          // 最小包大小
-    int max_size;          // 最大包大小
-    int delay_ms;          // 延时 (毫秒)
-    int first_packet_sent; // 状态标记：是否是第一个包 (ClientHello)
+    int first_packet_sent;
 } FragCtx;
 
 static int frag_write(BIO *b, const char *in, int inl);
@@ -39,14 +29,7 @@ BIO_METHOD *BIO_f_fragment(void) {
 static int frag_new(BIO *b) {
     FragCtx *ctx = (FragCtx *)malloc(sizeof(FragCtx));
     if(!ctx) return 0;
-    
-    // 初始化默认值 (防止未配置时出错)
     ctx->first_packet_sent = 0;
-    ctx->max_splits = 7;
-    ctx->min_size = 1;
-    ctx->max_size = 20;
-    ctx->delay_ms = 1;
-    
     BIO_set_data(b, ctx);
     BIO_set_init(b, 1);
     return 1;
@@ -59,58 +42,61 @@ static int frag_free(BIO *b) {
     return 1;
 }
 
-// [核心逻辑] 根据 Context 中的配置执行分片写入
+// [优化] 限制分片数量，防止握手超时
+#define MAX_FRAG_COUNT 32 
+
 static int frag_write(BIO *b, const char *in, int inl) {
     FragCtx *ctx = (FragCtx *)BIO_get_data(b);
     BIO *next = BIO_next(b);
     if (!ctx || !next) return 0;
 
-    // 仅针对 TLS 握手阶段的第一个包 (ClientHello) 进行分片处理
+    // 随机分片逻辑：仅针对握手阶段 (TLS ClientHello)
     if (inl > 0 && ctx->first_packet_sent == 0) {
         ctx->first_packet_sent = 1; 
 
         int bytes_sent = 0;
         int remaining = inl;
-        int split_count = 0;
+        int frag_count = 0;
 
         while (remaining > 0) {
-            // 策略：达到最大切分次数后，停止分片，剩余数据一次性发送
-            // 这既能打乱 SNI 特征，又能防止产生过多小包导致连接不稳定
-            if (split_count >= ctx->max_splits) {
+            // 安全逃逸：分片过多直接发送剩余数据
+            if (frag_count >= MAX_FRAG_COUNT) {
                 int ret = BIO_write(next, in + bytes_sent, remaining);
-                if (ret <= 0) return (bytes_sent > 0 ? bytes_sent : ret);
+                if (ret <= 0) {
+                    if (bytes_sent > 0) return bytes_sent;
+                    return ret;
+                }
                 bytes_sent += ret;
-                break; // 完成发送
+                remaining -= ret;
+                break;
             }
 
-            // 动态计算本次包大小
             int chunk_size;
-            int range = ctx->max_size - ctx->min_size;
+            int range = g_fragSizeMax - g_fragSizeMin;
             if (range < 0) range = 0;
+            chunk_size = g_fragSizeMin + (range > 0 ? (rand() % (range + 1)) : 0);
             
-            chunk_size = ctx->min_size + (range > 0 ? (rand() % (range + 1)) : 0);
-            
-            // 边界检查
             if (chunk_size < 1) chunk_size = 1;
             if (chunk_size > remaining) chunk_size = remaining;
 
-            // 执行底层写入
             int ret = BIO_write(next, in + bytes_sent, chunk_size);
-            if (ret <= 0) return (bytes_sent > 0 ? bytes_sent : ret);
+            
+            if (ret <= 0) {
+                if (bytes_sent > 0) return bytes_sent;
+                return ret;
+            }
 
             bytes_sent += ret;
             remaining -= ret;
-            split_count++;
+            frag_count++;
 
-            // 延时策略：仅在还有剩余数据时延时
-            if (remaining > 0 && ctx->delay_ms > 0) {
-                 Sleep(rand() % (ctx->delay_ms + 1));
+            if (remaining > 0 && g_fragDelayMs > 0) {
+                 Sleep(rand() % (g_fragDelayMs + 1));
             }
         }
         return bytes_sent;
     }
     
-    // 握手完成后的普通数据，直接透传，不影响速度
     return BIO_write(next, in, inl);
 }
 
@@ -123,23 +109,8 @@ static int frag_read(BIO *b, char *out, int outl) {
 static long frag_ctrl(BIO *b, int cmd, long num, void *ptr) {
     BIO *next = BIO_next(b);
     if (!next) return 0;
-    
-    // 处理自定义配置命令：设置分片参数
-    if (cmd == BIO_C_SET_FRAG_CONFIG) {
-        FragCtx *ctx = (FragCtx *)BIO_get_data(b);
-        FragCtx *new_cfg = (FragCtx *)ptr;
-        if (ctx && new_cfg) {
-            ctx->max_splits = new_cfg->max_splits;
-            ctx->min_size = new_cfg->min_size;
-            ctx->max_size = new_cfg->max_size;
-            ctx->delay_ms = new_cfg->delay_ms;
-        }
-        return 1;
-    }
-    
     return BIO_ctrl(next, cmd, num, ptr);
 }
-
 // ---------------------- End BIO Implementation ----------------------
 
 void FreeGlobalSSLContext() {
@@ -208,20 +179,19 @@ void init_openssl_global() {
     }
 }
 
-// [修改] 支持 mode 参数的智能连接初始化
-// mode 0: 温和模式 (基于 set.ini)
-// mode 1: 强力模式 (自动重试，更强的混淆)
-int tls_init_connect(TLSContext *ctx, int mode) {
+// --- 修复 Padding 导致的 MTU 问题 ---
+int tls_init_connect(TLSContext *ctx) {
     ctx->ssl = SSL_new(g_ssl_ctx);
     
-    // --- Padding 逻辑 (限制最大块大小以防 MTU 溢出) ---
     if (g_enablePadding) {
         int range = g_padSizeMax - g_padSizeMin;
         if (range < 0) range = 0;
         
         int blockSize = g_padSizeMin + (range > 0 ? (rand() % (range + 1)) : 0);
         
-        // 强制限制最大 Padding，防止 IP 分片导致握手失败
+        // [关键修复] 强制限制最大 Padding 块大小
+        // 防止：ClientHello (600) + Padding (1000) > MTU (1500)
+        // 限制为 200 可以提供足够的混淆，同时避免大跨度的对齐导致包过大
         if (blockSize > 200) blockSize = 200; 
 
         if (blockSize > 0) {
@@ -231,43 +201,9 @@ int tls_init_connect(TLSContext *ctx, int mode) {
 
     BIO *bio = BIO_new_socket(ctx->sock, BIO_NOCLOSE);
     
-    // --- 分片逻辑 ---
+    // 只有在启用分片时才压入 filter BIO
     if (g_enableFragment) {
         BIO *frag = BIO_new(BIO_f_fragment());
-        
-        // 配置结构体
-        FragCtx cfg;
-        
-        if (mode == 0) {
-            // Mode 0: 默认温和模式 (听从 set.ini，速度优先)
-            // 限制切分次数为 7，通常足够覆盖 SNI
-            cfg.max_splits = 7;           
-            cfg.min_size = g_fragSizeMin; 
-            cfg.max_size = g_fragSizeMax;
-            cfg.delay_ms = g_fragDelayMs; 
-        } else {
-            // Mode 1: 智能强力模式 (突破封锁优先)
-            
-            // 1. 切分次数大幅增加，确保即使是大包也能被切碎
-            cfg.max_splits = 40;          
-            
-            // 2. 强制使用极小包 (1-3字节)，无视 set.ini 设定
-            cfg.min_size = 1;             
-            cfg.max_size = 3;             
-            
-            // 3. 智能延时增强：确保延时至少为 3ms，或者比用户设定值更大
-            int base_delay = g_fragDelayMs;
-            if (base_delay < 3) base_delay = 3; 
-            else base_delay += 2;
-            
-            cfg.delay_ms = base_delay;
-            
-            log_msg("[Smart-Frag] Retry with Aggressive Mode: delay=%dms, splits=%d", cfg.delay_ms, cfg.max_splits);
-        }
-        
-        // 将配置应用到 BIO
-        BIO_ctrl(frag, BIO_C_SET_FRAG_CONFIG, 0, &cfg);
-        
         bio = BIO_push(frag, bio);
     }
     
