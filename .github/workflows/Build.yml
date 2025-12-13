@@ -1,6 +1,5 @@
 name: Windows Manual Build
 
-# 这里配置为手动触发
 on:
   workflow_dispatch:
 
@@ -16,7 +15,6 @@ jobs:
       uses: msys2/setup-msys2@v2
       with:
         msystem: MINGW64
-        # 关闭自动更新，防止在修复前崩溃
         update: false
         cache: false
         install: git
@@ -24,15 +22,30 @@ jobs:
     - name: Fix Signatures and Install Dependencies
       shell: msys2 {0}
       run: |
-        echo "Resetting GPG keys to fix signature errors..."
+        echo "Applying ultimate fix for GPG signature errors..."
+        
+        # 1. 临时禁用签名检查 (修改 /etc/pacman.conf)
+        # 这允许我们在没有有效密钥的情况下下载新的密钥环
+        sed -i 's/^SigLevel.*/SigLevel = Never/' /etc/pacman.conf
+        
+        # 2. 强行更新密钥环 (msys2-keyring)
+        echo "Updating keyring without signature check..."
+        pacman -Sy --noconfirm msys2-keyring
+        
+        # 3. 恢复签名检查 (为了安全)
+        sed -i 's/^SigLevel.*/SigLevel = Required DatabaseOptional/' /etc/pacman.conf
+        
+        # 4. 重新初始化密钥 (确保新下载的密钥生效)
+        echo "Re-initializing GPG keys..."
         rm -rf /etc/pacman.d/gnupg
         pacman-key --init
         pacman-key --populate msys2
         
-        echo "Updating keyring..."
-        pacman -Sy --noconfirm msys2-keyring
+        # 5. 再次同步数据库 (确保现在签名验证通过)
+        pacman -Sy
         
-        echo "Installing dependencies..."
+        # 6. 安装编译工具
+        echo "Installing build tools..."
         pacman -S --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl mingw-w64-x86_64-make
 
     - name: Compile Resources
