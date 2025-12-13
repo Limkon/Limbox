@@ -6,16 +6,15 @@
 #include <ws2tcpip.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include "crypto.h" // 确保包含 crypto.h 以使用 OpenSSL 头文件
+#include "crypto.h" 
 
-// 链接 Winsock 库
 #ifdef _MSC_VER
 #pragma comment(lib, "ws2_32.lib")
 #endif
 
-extern int g_localPort; // 引用全局端口变量
+extern int g_localPort; 
 
-// --- 日志函数 ---
+// --- 日志函数 (保持不变) ---
 void log_msg(const char *format, ...) {
     char buf[2048]; char time_buf[64]; SYSTEMTIME st; GetLocalTime(&st);
     sprintf(time_buf, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
@@ -38,7 +37,7 @@ void log_wsa_error(const char* context) {
     log_msg("[Error] %s Failed. Code: %d", context, err);
 }
 
-// --- 文件操作 ---
+// --- 文件操作 (保持不变) ---
 BOOL ReadFileToBuffer(const wchar_t* filename, char** buffer, long* fileSize) {
     FILE* f = NULL;
     if (_wfopen_s(&f, filename, L"rb") != 0 || !f) { *fileSize=0; return FALSE; }
@@ -58,7 +57,7 @@ BOOL WriteBufferToFile(const wchar_t* filename, const char* buffer) {
     fclose(f); return TRUE;
 }
 
-// --- 字符串处理 ---
+// --- 字符串处理 (保持不变) ---
 void TrimString(char* str) {
     if(!str) return;
     char* p = str; while(isspace((unsigned char)*p)) p++;
@@ -78,22 +77,42 @@ void UrlDecode(char* dst, const char* src) {
     *dst = '\0';
 }
 
+// --- [修复] GetQueryParam: 移除递归，改用循环，防止栈溢出 ---
 char* GetQueryParam(const char* query, const char* key) {
     if (!query || !key) return NULL;
-    char keyEq[128]; snprintf(keyEq, sizeof(keyEq), "%s=", key);
-    const char* start = strstr(query, keyEq);
-    if (!start) return NULL;
-    if (start != query && *(start - 1) != '&' && *(start - 1) != '?') return GetQueryParam(start + 1, key); 
-    start += strlen(keyEq);
-    const char* end = strchr(start, '&');
-    size_t len = end ? (size_t)(end - start) : strlen(start);
-    if (len == 0) return NULL;
-    char* value = (char*)malloc(len + 1); strncpy(value, start, len); value[len] = '\0';
-    char* decoded = (char*)malloc(len + 1); UrlDecode(decoded, value); free(value);
-    return decoded;
+    char keyEq[128]; 
+    snprintf(keyEq, sizeof(keyEq), "%s=", key);
+    size_t keyEqLen = strlen(keyEq);
+
+    const char* p = query;
+    while ((p = strstr(p, keyEq)) != NULL) {
+        // 检查前缀字符，确保匹配的是完整的 key
+        // 匹配必须在字符串开头，或者前一个字符是 '&' 或 '?'
+        if (p == query || *(p - 1) == '&' || *(p - 1) == '?') {
+            // 找到匹配
+            const char* start = p + keyEqLen;
+            const char* end = strchr(start, '&');
+            size_t len = end ? (size_t)(end - start) : strlen(start);
+            if (len == 0) return NULL;
+
+            char* value = (char*)malloc(len + 1);
+            if (!value) return NULL;
+            strncpy(value, start, len);
+            value[len] = '\0';
+
+            char* decoded = (char*)malloc(len + 1);
+            if (!decoded) { free(value); return NULL; }
+            UrlDecode(decoded, value);
+            free(value);
+            return decoded;
+        }
+        // 如果不是完整的 key (例如 searching "id", found "uid="), 继续查找下一个
+        p += 1; 
+    }
+    return NULL;
 }
 
-// --- Base64 ---
+// --- Base64 (保持不变) ---
 static int GetBase64Val(char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
@@ -169,6 +188,7 @@ typedef struct {
     int port;
 } URL_COMPONENTS_SIMPLE;
 
+// --- [修复] ParseUrl: 增加长度检查，防止缓冲区溢出 ---
 static BOOL ParseUrl(const char* url, URL_COMPONENTS_SIMPLE* out) {
     if (!url || !out) return FALSE;
     memset(out, 0, sizeof(URL_COMPONENTS_SIMPLE));
@@ -194,7 +214,10 @@ static BOOL ParseUrl(const char* url, URL_COMPONENTS_SIMPLE* out) {
 
     // Path
     if (slash) {
-        if (strlen(slash) >= sizeof(out->path)) return FALSE;
+        if (strlen(slash) >= sizeof(out->path)) {
+            // Path too long
+            return FALSE; 
+        }
         strcpy(out->path, slash);
     } else {
         strcpy(out->path, "/");
@@ -202,10 +225,11 @@ static BOOL ParseUrl(const char* url, URL_COMPONENTS_SIMPLE* out) {
     return TRUE;
 }
 
-// --- OpenSSL 下载核心实现 ---
+// --- InternalHttpsGet (保持不变) ---
 static char* InternalHttpsGet(const char* url, BOOL useProxy) {
     URL_COMPONENTS_SIMPLE u;
-    if (!ParseUrl(url, &u)) { log_msg("[Utils] Invalid URL: %s", url); return NULL; }
+    // 使用修复后的 ParseUrl
+    if (!ParseUrl(url, &u)) { log_msg("[Utils] Invalid URL or too long: %s", url); return NULL; }
 
     // 初始化 OpenSSL (如果尚未初始化)
     static int ssl_inited = 0;
@@ -277,13 +301,11 @@ static char* InternalHttpsGet(const char* url, BOOL useProxy) {
     ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) { closesocket(s); return NULL; }
     
-    // [关键] 禁用证书验证
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
 
     ssl = SSL_new(ctx);
     SSL_set_fd(ssl, (int)s);
 
-    // [关键] 设置 SNI (GitHub 需要)
     SSL_set_tlsext_host_name(ssl, u.host);
 
     if (SSL_connect(ssl) != 1) {
@@ -305,7 +327,6 @@ static char* InternalHttpsGet(const char* url, BOOL useProxy) {
     if (SSL_write(ssl, request, (int)strlen(request)) <= 0) goto cleanup;
 
     // 5. 读取响应
-    // 简单实现：读取所有数据，然后解析 Header
     int buffer_size = 65536; // 初始 64KB
     int total_read = 0;
     char* resp_buf = (char*)malloc(buffer_size);
@@ -319,38 +340,34 @@ static char* InternalHttpsGet(const char* url, BOOL useProxy) {
             resp_buf = new_buf;
         }
         int r = SSL_read(ssl, resp_buf + total_read, 4096);
-        if (r <= 0) break; // 连接关闭或错误
+        if (r <= 0) break; 
         total_read += r;
     }
     resp_buf[total_read] = 0;
 
     // 6. 解析 HTTP 响应
-    // 查找 header 结束标记
     char* body_start = strstr(resp_buf, "\r\n\r\n");
     if (!body_start) {
-        // 尝试只找 \n\n
         body_start = strstr(resp_buf, "\n\n");
     }
 
     if (body_start) {
-        // 移动指针跳过空行
         if (body_start[0] == '\r') body_start += 4;
         else body_start += 2;
 
-        // 计算 Body 长度
         int header_len = (int)(body_start - resp_buf);
         int body_len = total_read - header_len;
         
-        // 复制 Body 到新 buffer
-        result = (char*)malloc(body_len + 1);
-        memcpy(result, body_start, body_len);
-        result[body_len] = 0;
+        if (body_len > 0) {
+            result = (char*)malloc(body_len + 1);
+            memcpy(result, body_start, body_len);
+            result[body_len] = 0;
+        }
     } else {
-        // 没找到 Header？可能整个都是 Body 或者出错
         log_msg("[Utils] Invalid HTTP response format");
     }
 
-    free(resp_buf); // 释放原始接收缓冲
+    free(resp_buf); 
 
 cleanup:
     if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
@@ -359,7 +376,7 @@ cleanup:
     return result;
 }
 
-// --- 公开下载接口 ---
+// --- Utils_HttpGet (保持不变) ---
 char* Utils_HttpGet(const char* url) {
     if (!url) return NULL;
     
@@ -374,7 +391,7 @@ char* Utils_HttpGet(const char* url) {
     return InternalHttpsGet(url, FALSE);
 }
 
-// --- Windows 代理设置 (保留原功能) ---
+// --- Windows 代理设置 (保持不变) ---
 BOOL IsWindows8OrGreater() {
     HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
     if (hKernel32 == NULL) return FALSE;
