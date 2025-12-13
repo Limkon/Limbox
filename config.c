@@ -1,6 +1,6 @@
 #include "config.h"
 #include "utils.h"
-#include "proxy.h" // 需要 StartProxyCore/StopProxyCore
+#include "proxy.h" 
 
 void LoadSettings() {
     g_hotkeyModifiers = GetPrivateProfileIntW(L"Settings", L"Modifiers", MOD_CONTROL | MOD_ALT, g_iniFilePath);
@@ -12,18 +12,16 @@ void LoadSettings() {
     g_enableChromeCiphers = GetPrivateProfileIntW(L"Settings", L"ChromeCiphers", 1, g_iniFilePath);
     g_enableALPN = GetPrivateProfileIntW(L"Settings", L"EnableALPN", 1, g_iniFilePath);
     
-    // 默认启用分片 (Default: 1)
-    g_enableFragment = GetPrivateProfileIntW(L"Settings", L"EnableFragment", 1, g_iniFilePath);
+    // --- 修改点：默认值为 0 (关闭) ---
+    g_enableFragment = GetPrivateProfileIntW(L"Settings", L"EnableFragment", 0, g_iniFilePath);
     
-    // 分片默认值修正: 5 - 20
     g_fragSizeMin = GetPrivateProfileIntW(L"Settings", L"FragMin", 5, g_iniFilePath);
     g_fragSizeMax = GetPrivateProfileIntW(L"Settings", L"FragMax", 20, g_iniFilePath);
     g_fragDelayMs = GetPrivateProfileIntW(L"Settings", L"FragDelay", 2, g_iniFilePath);
 
-    // 默认启用 Padding (Default: 1)
-    g_enablePadding = GetPrivateProfileIntW(L"Settings", L"EnablePadding", 1, g_iniFilePath);
+    // --- 修改点：默认值为 0 (关闭) ---
+    g_enablePadding = GetPrivateProfileIntW(L"Settings", L"EnablePadding", 0, g_iniFilePath);
     
-    // Padding 默认值修正: 100 - 500
     g_padSizeMin = GetPrivateProfileIntW(L"Settings", L"PadMin", 100, g_iniFilePath);
     g_padSizeMax = GetPrivateProfileIntW(L"Settings", L"PadMax", 500, g_iniFilePath);
 
