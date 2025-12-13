@@ -42,8 +42,9 @@ static int frag_free(BIO *b) {
     return 1;
 }
 
-// [优化] 限制分片数量，防止握手超时
-#define MAX_FRAG_COUNT 32 
+// [优化] 增加分片上限以覆盖整个SNI，但限制Sleep次数以防超时
+#define MAX_FRAG_COUNT 200 
+#define MAX_SLEEP_COUNT 5
 
 static int frag_write(BIO *b, const char *in, int inl) {
     FragCtx *ctx = (FragCtx *)BIO_get_data(b);
@@ -59,7 +60,8 @@ static int frag_write(BIO *b, const char *in, int inl) {
         int frag_count = 0;
 
         while (remaining > 0) {
-            // 安全逃逸：分片过多直接发送剩余数据
+            // 安全逃逸：如果分片次数实在太多(超过200次)，直接发送剩余数据
+            // 防止极端配置(如1字节分片)导致的CPU/网络过载
             if (frag_count >= MAX_FRAG_COUNT) {
                 int ret = BIO_write(next, in + bytes_sent, remaining);
                 if (ret <= 0) {
@@ -82,6 +84,7 @@ static int frag_write(BIO *b, const char *in, int inl) {
             int ret = BIO_write(next, in + bytes_sent, chunk_size);
             
             if (ret <= 0) {
+                // 如果底层 buffer 满，返回已发送字节数，让 OpenSSL 处理重试
                 if (bytes_sent > 0) return bytes_sent;
                 return ret;
             }
@@ -90,7 +93,10 @@ static int frag_write(BIO *b, const char *in, int inl) {
             remaining -= ret;
             frag_count++;
 
-            if (remaining > 0 && g_fragDelayMs > 0) {
+            // [关键修复] 仅对前 5 个分片进行延时
+            // 这样既能混淆流量头部特征，又保证了整体握手速度极快，
+            // 解决了 "首次打开慢" 和 "下载超时" 的问题。
+            if (remaining > 0 && g_fragDelayMs > 0 && frag_count <= MAX_SLEEP_COUNT) {
                  Sleep(rand() % (g_fragDelayMs + 1));
             }
         }
@@ -189,9 +195,7 @@ int tls_init_connect(TLSContext *ctx) {
         
         int blockSize = g_padSizeMin + (range > 0 ? (rand() % (range + 1)) : 0);
         
-        // [关键修复] 强制限制最大 Padding 块大小
-        // 防止：ClientHello (600) + Padding (1000) > MTU (1500)
-        // 限制为 200 可以提供足够的混淆，同时避免大跨度的对齐导致包过大
+        // 强制限制最大 Padding 块大小，防止 MTU 溢出
         if (blockSize > 200) blockSize = 200; 
 
         if (blockSize > 0) {
