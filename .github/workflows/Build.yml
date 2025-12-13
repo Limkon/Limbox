@@ -1,6 +1,6 @@
 name: Windows Manual Build
 
-# 這裡配置為手動觸發
+# 这里配置为手动触发
 on:
   workflow_dispatch:
 
@@ -16,35 +16,33 @@ jobs:
       uses: msys2/setup-msys2@v2
       with:
         msystem: MINGW64
-        # 關鍵修改：關閉自動更新以避免簽名錯誤導致崩潰
+        # 关闭自动更新，防止在修复前崩溃
         update: false
-        # 禁用緩存以確保環境純淨
         cache: false
-        # 這裡只預裝 git，其他依賴在下一步手動安裝
         install: git
 
-    - name: Update Keyring and Install Dependencies
+    - name: Fix Signatures and Install Dependencies
       shell: msys2 {0}
       run: |
-        # 1. 強制單獨更新金鑰環，解決 "signature invalid" 問題
+        echo "Resetting GPG keys to fix signature errors..."
+        rm -rf /etc/pacman.d/gnupg
+        pacman-key --init
+        pacman-key --populate msys2
+        
+        echo "Updating keyring..."
         pacman -Sy --noconfirm msys2-keyring
-
-        # 2. 手動安裝編譯依賴 (GCC, OpenSSL, Make)
-        # 注意：這裡安裝的是與 MINGW64 環境對應的包
+        
+        echo "Installing dependencies..."
         pacman -S --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-openssl mingw-w64-x86_64-make
 
     - name: Compile Resources
       shell: msys2 {0}
       run: |
-        # 對應本地的 "編譯圖標和版本.bat"
-        # windres 通常包含在 gcc/binutils 依賴中
         windres -i resource.rc -o resource.res --target=pe-x86-64 -O coff
 
     - name: Compile Executable
       shell: msys2 {0}
       run: |
-        # 對應本地的 "run.bat"，已適配 GitHub 環境路徑
-        # 使用 MSYS2 環境的標準庫 (-lssl -lcrypto) 替代本地絕對路徑
         gcc main.c resource.res -o limbox.exe \
           -lssl -lcrypto -lws2_32 -lgdi32 -lcomctl32 -lwininet -lcrypt32 -luser32 \
           -mwindows -municode -finput-charset=UTF-8 -static
