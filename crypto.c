@@ -48,7 +48,7 @@ static int frag_write(BIO *b, const char *in, int inl) {
     if (!ctx || !next) return 0;
 
     // 随机分片逻辑：仅针对握手阶段 (TLS ClientHello)
-    // 优化：引入智能分片策略，避免过度切分导致丢包
+    // 优化：引入智能分片策略，避免过度切分导致丢包或握手超时
     if (inl > 0 && ctx->first_packet_sent == 0) {
         ctx->first_packet_sent = 1; 
 
@@ -57,18 +57,21 @@ static int frag_write(BIO *b, const char *in, int inl) {
         int frag_count = 0;
         
         // --- 优化核心：限制最大分片数量和范围 ---
-        // 多数 SNI 阻断设备仅检测前几个包或前几百字节。
-        // 限制前 256 字节或 15 个包进行切分，既能混淆 SNI，又能防止因包过多被防火墙丢弃。
-        const int MAX_FRAG_COUNT = 15;   
-        const int MAX_FRAG_BYTES = 256; 
+        // 1. MAX_FRAG_BYTES: 512 字节通常足以覆盖 TLS ClientHello 中的 SNI 扩展和 Session Ticket。
+        //    只要覆盖了这一段，核心的域名混淆目标就达成了，后续数据不分片也是安全的。
+        // 2. MAX_FRAG_COUNT: 提高到 100，允许用户设置较小的分片大小 (如 1-5 字节) 
+        //    而不至于在 SNI 发送完之前就耗尽次数停止分片。
+        const int MAX_FRAG_COUNT = 100;   
+        const int MAX_FRAG_BYTES = 512; 
 
         while (remaining > 0) {
             int chunk_size;
 
-            // 策略：如果已经切了太多包，或者已经覆盖了 SNI 区域，则停止切分直接发送剩余部分
+            // 策略：只有当 "超过最大包数" 或 "已覆盖 SNI 范围" 时，才停止分片，将剩余数据一次性发送
             if (frag_count >= MAX_FRAG_COUNT || bytes_sent >= MAX_FRAG_BYTES) {
-                chunk_size = remaining;
+                chunk_size = remaining; 
             } else {
+                // 正常分片：完全尊重用户的 FragMin / FragMax 配置
                 int range = g_fragSizeMax - g_fragSizeMin;
                 if (range < 0) range = 0;
                 chunk_size = g_fragSizeMin + (range > 0 ? (rand() % (range + 1)) : 0);
@@ -79,10 +82,10 @@ static int frag_write(BIO *b, const char *in, int inl) {
 
             int ret = BIO_write(next, in + bytes_sent, chunk_size);
             
-            // 错误处理：如果底层写入失败或阻塞
+            // 错误处理：如果底层写入失败
             if (ret <= 0) {
                 // 如果之前已经成功发送了一些数据，则返回已发送量。
-                // OpenSSL 会再次调用此函数写入剩余部分（此时 first_packet_sent 已为 1，将直接透传，保证稳健性）。
+                // OpenSSL 会再次调用此函数写入剩余部分（此时 first_packet_sent 已为 1，将直接透传）。
                 if (bytes_sent > 0) return bytes_sent;
                 return ret;
             }
@@ -91,7 +94,7 @@ static int frag_write(BIO *b, const char *in, int inl) {
             remaining -= ret;
             frag_count++;
 
-            // 仅在确实进行了切分（非最后的大块传输）且配置了延时时 sleep
+            // 延时处理：仅在确实进行了切分（非最后的大块传输）且用户配置了延时时才 Sleep
             // 避免握手最后阶段无意义的等待
             if (remaining > 0 && chunk_size < remaining && g_fragDelayMs > 0) {
                  Sleep(rand() % (g_fragDelayMs + 1));
