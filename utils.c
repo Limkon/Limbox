@@ -121,3 +121,99 @@ char* GetQueryParam(const char* query, const char* key) {
     char* decoded = (char*)malloc(len + 1); UrlDecode(decoded, value); free(value);
     return decoded;
 }
+
+// --- 新增：系统代理功能实现 ---
+
+BOOL IsWindows8OrGreater() {
+    HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (hKernel32 == NULL) return FALSE;
+    FARPROC pFunc = GetProcAddress(hKernel32, "SetProcessMitigationPolicy");
+    return (pFunc != NULL);
+}
+
+void SetSystemProxy(BOOL enable) {
+    if (g_localPort <= 0 && enable) {
+        MessageBoxW(NULL, L"本地端口无效，无法设置系统代理。", L"错误", MB_OK | MB_ICONERROR);
+        return;
+    }
+    wchar_t proxyServerString[256] = {0};
+    wchar_t proxyBypassString[64] = {0};
+    if (enable) {
+        wchar_t addrBuf[128];
+        wsprintfW(addrBuf, L"http=127.0.0.1:%d;socks=127.0.0.1:%d", g_localPort, g_localPort);
+        wcscpy(proxyServerString, addrBuf);
+        wcsncpy(proxyBypassString, L"<local>", 63);
+    }
+    if (IsWindows8OrGreater()) {
+        HKEY hKey;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH_PROXY, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) != ERROR_SUCCESS) {
+            log_msg("[Error] Failed to open registry for system proxy.");
+            return;
+        }
+        if (enable) {
+            DWORD dwEnable = 1;
+            RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
+            RegSetValueExW(hKey, L"ProxyOverride", 0, REG_SZ, (const BYTE*)proxyBypassString, (wcslen(proxyBypassString) + 1) * sizeof(wchar_t));
+            RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE*)proxyServerString, (wcslen(proxyServerString) + 1) * sizeof(wchar_t));
+            RegDeleteValueW(hKey, L"SocksProxyServer"); 
+        } else {
+            DWORD dwEnable = 0;
+            RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
+            RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE*)L"", sizeof(wchar_t));
+            RegDeleteValueW(hKey, L"SocksProxyServer");
+        }
+        RegCloseKey(hKey);
+    } else {
+        INTERNET_PER_CONN_OPTION_LISTW list;
+        INTERNET_PER_CONN_OPTIONW options[3];
+        DWORD dwBufSize = sizeof(list);
+        options[0].dwOption = INTERNET_PER_CONN_FLAGS;
+        options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
+        options[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS;
+        if (enable) {
+            options[0].Value.dwValue = PROXY_TYPE_PROXY;
+            options[1].Value.pszValue = proxyServerString;
+            options[2].Value.pszValue = proxyBypassString;
+        } else {
+            options[0].Value.dwValue = PROXY_TYPE_DIRECT;
+            options[1].Value.pszValue = L"";
+            options[2].Value.pszValue = L"";
+        }
+        list.dwSize = sizeof(list);
+        list.pszConnection = NULL;
+        list.dwOptionCount = 3;
+        list.dwOptionError = 0;
+        list.pOptions = options;
+        if (!InternetSetOptionW(NULL, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, dwBufSize)) {
+            log_msg("[Error] InternetSetOptionW failed.");
+            return;
+        }
+    }
+    InternetSetOptionW(NULL, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0);
+    InternetSetOptionW(NULL, INTERNET_OPTION_REFRESH, NULL, 0);
+    log_msg("[System] System proxy %s.", enable ? "enabled" : "disabled");
+}
+
+BOOL IsSystemProxyEnabled() {
+    HKEY hKey;
+    DWORD dwEnable = 0;
+    DWORD dwSize = sizeof(dwEnable);
+    wchar_t proxyServer[1024] = {0};
+    DWORD dwProxySize = sizeof(proxyServer);
+    BOOL isEnabled = FALSE;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, REG_PATH_PROXY, 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hKey, L"ProxyEnable", NULL, NULL, (LPBYTE)&dwEnable, &dwSize) == ERROR_SUCCESS) {
+            if (dwEnable == 1) {
+                if (RegQueryValueExW(hKey, L"ProxyServer", NULL, NULL, (LPBYTE)proxyServer, &dwProxySize) == ERROR_SUCCESS) {
+                    wchar_t expectedPart[64];
+                    wsprintfW(expectedPart, L"127.0.0.1:%d", g_localPort);
+                    if (wcsstr(proxyServer, expectedPart) != NULL) {
+                        isEnabled = TRUE;
+                    }
+                }
+            }
+        }
+        RegCloseKey(hKey);
+    }
+    return isEnabled;
+}
