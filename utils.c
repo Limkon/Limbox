@@ -29,13 +29,6 @@
 #endif
 // ------------------------------------
 
-static const unsigned char base64_table[256] = {
-    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-    0,0,0,0,0,0,0,0,0,0,0,62,0,0,0,63,52,53,54,55,56,57,58,59,60,61,0,0,0,0,0,0,
-    0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,0,0,0,0,0,
-    0,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51
-};
-
 void log_msg(const char *format, ...) {
     char buf[2048]; char time_buf[64]; SYSTEMTIME st; GetLocalTime(&st);
     sprintf(time_buf, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
@@ -77,28 +70,73 @@ BOOL WriteBufferToFile(const wchar_t* filename, const char* buffer) {
     fclose(f); return TRUE;
 }
 
+// 辅助函数：获取 Base64 字符值，支持标准和 URL-Safe，非法字符返回 -1
+static int GetBase64Val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+' || c == '-') return 62; // 兼容 URL-Safe
+    if (c == '/' || c == '_') return 63; // 兼容 URL-Safe
+    return -1;
+}
+
 unsigned char* Base64Decode(const char* src, size_t* out_len) {
     if (!src) return NULL;
     size_t len = strlen(src);
-    while (len > 0 && (src[len-1] == '\n' || src[len-1] == '\r' || src[len-1] == ' ')) len--;
-    if (len > 0 && src[len-1] == '=') len--;
-    if (len > 0 && src[len-1] == '=') len--;
-    *out_len = (len * 3) / 4;
-    unsigned char* out = (unsigned char*)malloc(*out_len + 1);
-    if (!out) return NULL;
-    for (size_t i = 0, j = 0; i < len;) {
-        unsigned char c = (unsigned char)src[i++];
-        if (c == '\n' || c == '\r' || c == ' ') continue;
-        uint32_t a = base64_table[c];
-        uint32_t b = (i < len) ? base64_table[(unsigned char)src[i++]] : 0;
-        uint32_t c_val = (i < len) ? base64_table[(unsigned char)src[i++]] : 0;
-        uint32_t d = (i < len) ? base64_table[(unsigned char)src[i++]] : 0;
-        uint32_t triple = (a << 18) | (b << 12) | (c_val << 6) | d;
-        if (j < *out_len) out[j++] = (triple >> 16) & 0xFF;
-        if (j < *out_len) out[j++] = (triple >> 8) & 0xFF;
-        if (j < *out_len) out[j++] = triple & 0xFF;
+    
+    // 过滤末尾的空白和填充符
+    while (len > 0 && (src[len-1] == '\n' || src[len-1] == '\r' || src[len-1] == ' ' || src[len-1] == '=')) {
+        len--;
     }
-    out[*out_len] = '\0'; return out;
+
+    if (len == 0) { *out_len = 0; return NULL; }
+
+    *out_len = (len * 3) / 4;
+    unsigned char* out = (unsigned char*)malloc(*out_len + 4); // 多分配一点防止溢出
+    if (!out) return NULL;
+
+    size_t i = 0, j = 0;
+    while (i < len) {
+        // 跳过空白符
+        if (src[i] == '\r' || src[i] == '\n' || src[i] == ' ') {
+            i++; continue;
+        }
+
+        // 收集 4 个有效字符
+        int vals[4];
+        int val_cnt = 0;
+        
+        while (i < len && val_cnt < 4) {
+            char c = src[i];
+            if (c == '\r' || c == '\n' || c == ' ') { i++; continue; }
+            if (c == '=') { i++; break; } // 遇到等号结束当前块
+            
+            int v = GetBase64Val(c);
+            if (v == -1) {
+                // [关键修复] 遇到非法字符（如 : / . 等非Base64字符），视为非Base64编码
+                // 返回 NULL 让上层调用者作为普通文本处理
+                free(out);
+                return NULL;
+            }
+            vals[val_cnt++] = v;
+            i++;
+        }
+
+        if (val_cnt > 0) {
+            uint32_t triple = (vals[0] << 18) | 
+                              ((val_cnt > 1 ? vals[1] : 0) << 12) | 
+                              ((val_cnt > 2 ? vals[2] : 0) << 6) | 
+                              ((val_cnt > 3 ? vals[3] : 0));
+
+            if (j < *out_len) out[j++] = (triple >> 16) & 0xFF;
+            if (val_cnt > 2 && j < *out_len) out[j++] = (triple >> 8) & 0xFF;
+            if (val_cnt > 3 && j < *out_len) out[j++] = triple & 0xFF;
+        }
+    }
+    
+    out[j] = '\0';
+    *out_len = j;
+    return out;
 }
 
 void UrlDecode(char* dst, const char* src) {
@@ -171,15 +209,16 @@ char* Utils_HttpGet(const char* url) {
     // 使用 Chrome User-Agent
     const char* ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
     
-    HINTERNET hInternet = InternetOpenA(ua, INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    // [关键修复] 使用 INTERNET_OPEN_TYPE_DIRECT 而非 PRECONFIG
+    // 防止开启系统代理后，更新请求被转发到自身端口(127.0.0.1)，导致死锁或下载失败
+    HINTERNET hInternet = InternetOpenA(ua, INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, 0);
     if (!hInternet) {
         log_msg("[Utils] InternetOpen failed: %d", GetLastError());
         return NULL;
     }
 
-    // 显式启用 TLS 1.2 和 1.3 (修复 error 12157)
-    // 兼容性定义：SP_PROT_TLS1_2_CLIENT (0x800) | SP_PROT_TLS1_3_CLIENT (0x2000)
-    DWORD secure_protocols = SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT | 0x00000080; // + TLS 1.1
+    // 显式启用 TLS 1.2 和 1.3
+    DWORD secure_protocols = SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT | 0x00000080; 
     InternetSetOption(hInternet, INTERNET_OPTION_SECURE_PROTOCOLS, &secure_protocols, sizeof(secure_protocols));
 
     // 设置 30 秒超时
@@ -193,7 +232,7 @@ char* Utils_HttpGet(const char* url) {
                   INTERNET_FLAG_SECURE | 
                   INTERNET_FLAG_IGNORE_CERT_CN_INVALID | 
                   INTERNET_FLAG_IGNORE_CERT_DATE_INVALID |
-                  0x00002000; // INTERNET_FLAG_IGNORE_CERT_DATA_INVALID
+                  0x00002000; 
 
     HINTERNET hConnect = InternetOpenUrlA(hInternet, url, NULL, 0, flags, 0);
     
@@ -253,37 +292,29 @@ void SetSystemProxy(BOOL enable) {
     wchar_t proxyBypassString[64] = {0};
 
     if (enable) {
-        // [修复] 优化代理字符串格式
-        // 之前使用 "http=...;socks=..." 导致 Win10/11 设置界面解析失败显示空白
-        // 改为直接使用 "IP:端口" 格式，兼容性最好
         wsprintfW(proxyServerString, L"127.0.0.1:%d", g_localPort);
         wcsncpy(proxyBypassString, L"<local>", 63);
     }
 
     if (IsWindows8OrGreater()) {
         HKEY hKey;
-        // 使用 KEY_SET_VALUE 权限打开注册表
         if (RegCreateKeyExW(HKEY_CURRENT_USER, REG_PATH_PROXY, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
             if (enable) {
                 DWORD dwEnable = 1;
                 RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
                 RegSetValueExW(hKey, L"ProxyOverride", 0, REG_SZ, (const BYTE*)proxyBypassString, (wcslen(proxyBypassString) + 1) * sizeof(wchar_t));
                 RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE*)proxyServerString, (wcslen(proxyServerString) + 1) * sizeof(wchar_t));
-                
-                // 清理可能导致冲突的旧键值，防止干扰
                 RegDeleteValueW(hKey, L"SocksProxyServer"); 
                 RegDeleteValueW(hKey, L"AutoConfigURL"); 
             } else {
                 DWORD dwEnable = 0;
                 RegSetValueExW(hKey, L"ProxyEnable", 0, REG_DWORD, (const BYTE*)&dwEnable, sizeof(dwEnable));
-                // 关闭时清空代理服务器设置，保持界面整洁
                 RegSetValueExW(hKey, L"ProxyServer", 0, REG_SZ, (const BYTE*)L"", sizeof(wchar_t));
                 RegDeleteValueW(hKey, L"SocksProxyServer");
             }
             RegCloseKey(hKey);
         }
     } else {
-        // Win7 及更早系统的兼容代码
         INTERNET_PER_CONN_OPTION_LISTW list;
         INTERNET_PER_CONN_OPTIONW options[3];
         DWORD dwBufSize = sizeof(list);
@@ -306,7 +337,6 @@ void SetSystemProxy(BOOL enable) {
         list.pOptions = options;
         InternetSetOptionW(NULL, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, dwBufSize);
     }
-    // 立即刷新系统代理设置
     InternetSetOptionW(NULL, INTERNET_OPTION_SETTINGS_CHANGED, NULL, 0);
     InternetSetOptionW(NULL, INTERNET_OPTION_REFRESH, NULL, 0);
 }
