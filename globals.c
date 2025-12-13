@@ -30,13 +30,20 @@ int g_nEditContentHeight = 0;
 // 抗封锁配置
 BOOL g_enableChromeCiphers = TRUE;
 BOOL g_enableALPN = TRUE;
-BOOL g_enableFragment = FALSE;
+// 默认启用分片
+BOOL g_enableFragment = TRUE; 
+// 最佳分片默认值：5 - 20 字节
 int g_fragSizeMin = 5;
 int g_fragSizeMax = 20;
 int g_fragDelayMs = 2;
-BOOL g_enablePadding = FALSE;
-int g_padSizeMin = 1;
-int g_padSizeMax = 10;
+
+// 默认启用 Padding
+BOOL g_enablePadding = TRUE;
+// 最佳 Padding 默认值：100 - 500 字节
+// 确保足够大以掩盖 HTTP 请求头特征，且区间足够大以提供随机性
+int g_padSizeMin = 100;
+int g_padSizeMax = 500;
+
 int g_uaPlatformIndex = 0; 
 char g_userAgentStr[512] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
