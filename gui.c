@@ -7,6 +7,9 @@
 // 宣告 ListBox 的舊視窗程序變數
 WNDPROC g_oldListBoxProc = NULL;
 
+// 用于追踪设置窗口的句柄，实现单例模式
+static HWND hSettingsWnd = NULL;
+
 // --- 补全缺失的辅助函数 ---
 
 void AddComboItem(HWND hCombo, const wchar_t* text, BOOL select) {
@@ -159,67 +162,69 @@ LRESULT CALLBACK ListBox_Proc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return CallWindowProc(g_oldListBoxProc, hWnd, msg, wParam, lParam);
 }
 
+// 设置窗口过程：单例模式，界面已扩容并优化布局
 LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hHotkey, hPortEdit;
     switch(msg) {
         case WM_CREATE: {
             int y = 20;
-            // 1. 基礎設置
-            CreateWindowW(L"STATIC", L"全局快捷鍵:", WS_CHILD|WS_VISIBLE, 20, y, 100, 20, hWnd, NULL,NULL,NULL);
-            hHotkey = CreateWindowExW(0, HOTKEY_CLASSW, NULL, WS_CHILD|WS_VISIBLE|WS_BORDER, 130, y-3, 180, 25, hWnd, (HMENU)ID_HOTKEY_CTRL, NULL,NULL);
+            // 基础设置区域
+            CreateWindowW(L"STATIC", L"全局快捷键:", WS_CHILD|WS_VISIBLE, 25, y, 100, 20, hWnd, NULL,NULL,NULL);
+            hHotkey = CreateWindowExW(0, HOTKEY_CLASSW, NULL, WS_CHILD|WS_VISIBLE|WS_BORDER, 130, y-3, 280, 25, hWnd, (HMENU)ID_HOTKEY_CTRL, NULL,NULL);
             UINT hkMod = 0; if (g_hotkeyModifiers & MOD_SHIFT) hkMod |= HOTKEYF_SHIFT;
             if (g_hotkeyModifiers & MOD_CONTROL) hkMod |= HOTKEYF_CONTROL;
             if (g_hotkeyModifiers & MOD_ALT) hkMod |= HOTKEYF_ALT;
             SendMessage(hHotkey, HKM_SETHOTKEY, MAKEWORD(g_hotkeyVk, hkMod), 0);
             
             y += 35;
-            CreateWindowW(L"STATIC", L"本地代理端口:", WS_CHILD|WS_VISIBLE, 20, y, 100, 20, hWnd, NULL,NULL,NULL);
-            hPortEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL, WS_CHILD|WS_VISIBLE|ES_NUMBER, 130, y-3, 80, 25, hWnd, (HMENU)ID_PORT_EDIT, NULL,NULL);
+            CreateWindowW(L"STATIC", L"本地代理端口:", WS_CHILD|WS_VISIBLE, 25, y, 100, 20, hWnd, NULL,NULL,NULL);
+            hPortEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL, WS_CHILD|WS_VISIBLE|ES_NUMBER, 130, y-3, 100, 25, hWnd, (HMENU)ID_PORT_EDIT, NULL,NULL);
             SetDlgItemInt(hWnd, ID_PORT_EDIT, g_localPort, FALSE);
 
-            // 2. 抗封鎖設置 GroupBox
-            y += 40;
-            CreateWindowW(L"BUTTON", L"抗封鎖設置 (Anti-Censorship)", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 20, y, 300, 310, hWnd, NULL, NULL, NULL);
+            // 抗封锁设置 GroupBox (扩容)
+            y += 45;
+            CreateWindowW(L"BUTTON", L"抗封锁策略", WS_CHILD|WS_VISIBLE|BS_GROUPBOX, 20, y, 405, 330, hWnd, NULL, NULL, NULL);
             
             y += 25;
-            HWND hChk1 = CreateWindowW(L"BUTTON", L"啟用 Chrome 瀏覽器指紋", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 250, 20, hWnd, (HMENU)ID_CHK_CIPHERS, NULL, NULL);
-            y += 25;
-            HWND hChk2 = CreateWindowW(L"BUTTON", L"啟用 ALPN 偽裝 (http/1.1)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 250, 20, hWnd, (HMENU)ID_CHK_ALPN, NULL, NULL);
-            
-            // --- 分片設置 ---
-            y += 25;
-            HWND hChk3 = CreateWindowW(L"BUTTON", L"啟用 TCP 隨機分片 (Fragment)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 250, 20, hWnd, (HMENU)ID_CHK_FRAG, NULL, NULL);
-            
-            y += 25;
-            CreateWindowW(L"STATIC", L"分片長度範圍:", WS_CHILD|WS_VISIBLE, 55, y+2, 90, 20, hWnd, NULL,NULL,NULL);
-            HWND hFMin = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 145, y, 35, 22, hWnd, (HMENU)ID_EDIT_FRAG_MIN, NULL, NULL);
-            CreateWindowW(L"STATIC", L"-", WS_CHILD|WS_VISIBLE, 185, y+2, 10, 20, hWnd, NULL,NULL,NULL);
-            HWND hFMax = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 200, y, 35, 22, hWnd, (HMENU)ID_EDIT_FRAG_MAX, NULL, NULL);
-            
-            CreateWindowW(L"STATIC", L"延遲(ms):", WS_CHILD|WS_VISIBLE, 245, y+2, 60, 20, hWnd, NULL,NULL,NULL);
-            HWND hDly = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER, 290, y, 20, 22, hWnd, (HMENU)ID_EDIT_FRAG_DLY, NULL, NULL);
-
-            // --- Padding 設置 ---
+            HWND hChk1 = CreateWindowW(L"BUTTON", L"启用 Chrome 浏览器指纹模拟", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 350, 22, hWnd, (HMENU)ID_CHK_CIPHERS, NULL, NULL);
             y += 30;
-            HWND hChkPad = CreateWindowW(L"BUTTON", L"啟用 TLS Padding (隨機包長)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 250, 20, hWnd, (HMENU)ID_CHK_PADDING, NULL, NULL);
+            HWND hChk2 = CreateWindowW(L"BUTTON", L"启用 ALPN 协议伪装 (http/1.1)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 350, 22, hWnd, (HMENU)ID_CHK_ALPN, NULL, NULL);
             
-            y += 25;
-            CreateWindowW(L"STATIC", L"隨機填充範圍:", WS_CHILD|WS_VISIBLE, 55, y+2, 90, 20, hWnd, NULL,NULL,NULL);
-            HWND hPMin = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 145, y, 35, 22, hWnd, (HMENU)ID_EDIT_PAD_MIN, NULL, NULL);
-            CreateWindowW(L"STATIC", L"-", WS_CHILD|WS_VISIBLE, 185, y+2, 10, 20, hWnd, NULL,NULL,NULL);
-            HWND hPMax = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 200, y, 35, 22, hWnd, (HMENU)ID_EDIT_PAD_MAX, NULL, NULL);
+            // --- 分片设置 ---
+            y += 30;
+            HWND hChk3 = CreateWindowW(L"BUTTON", L"启用 TCP 随机分片 (对抗 SNI 阻断)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 350, 22, hWnd, (HMENU)ID_CHK_FRAG, NULL, NULL);
+            
+            y += 30;
+            CreateWindowW(L"STATIC", L"分片长度范围:", WS_CHILD|WS_VISIBLE, 55, y+2, 90, 20, hWnd, NULL,NULL,NULL);
+            HWND hFMin = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 150, y, 40, 22, hWnd, (HMENU)ID_EDIT_FRAG_MIN, NULL, NULL);
+            CreateWindowW(L"STATIC", L"-", WS_CHILD|WS_VISIBLE, 195, y+2, 10, 20, hWnd, NULL,NULL,NULL);
+            HWND hFMax = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 210, y, 40, 22, hWnd, (HMENU)ID_EDIT_FRAG_MAX, NULL, NULL);
+            
+            CreateWindowW(L"STATIC", L"延迟(ms):", WS_CHILD|WS_VISIBLE, 270, y+2, 60, 20, hWnd, NULL,NULL,NULL);
+            HWND hDly = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 335, y, 40, 22, hWnd, (HMENU)ID_EDIT_FRAG_DLY, NULL, NULL);
 
-            // --- UA 設置 ---
+            // --- Padding 设置 ---
             y += 35;
-            CreateWindowW(L"STATIC", L"偽裝平台:", WS_CHILD|WS_VISIBLE, 35, y, 60, 20, hWnd, NULL,NULL,NULL);
-            HWND hCombo = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, 100, y-3, 200, 200, hWnd, (HMENU)ID_COMBO_PLATFORM, NULL, NULL);
+            HWND hChkPad = CreateWindowW(L"BUTTON", L"启用 TLS 流量填充 (随机包长度)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, 35, y, 350, 22, hWnd, (HMENU)ID_CHK_PADDING, NULL, NULL);
             
-            y += 25;
-            HWND hEditUA = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL, 35, y, 265, 25, hWnd, (HMENU)ID_EDIT_UA_STR, NULL, NULL);
+            y += 30;
+            CreateWindowW(L"STATIC", L"随机填充范围:", WS_CHILD|WS_VISIBLE, 55, y+2, 90, 20, hWnd, NULL,NULL,NULL);
+            HWND hPMin = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 150, y, 40, 22, hWnd, (HMENU)ID_EDIT_PAD_MIN, NULL, NULL);
+            CreateWindowW(L"STATIC", L"-", WS_CHILD|WS_VISIBLE, 195, y+2, 10, 20, hWnd, NULL,NULL,NULL);
+            HWND hPMax = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER|ES_CENTER, 210, y, 40, 22, hWnd, (HMENU)ID_EDIT_PAD_MAX, NULL, NULL);
 
-            // 按鈕
-            CreateWindowW(L"BUTTON", L"確定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 60, 420, 80, 30, hWnd, (HMENU)IDOK, NULL,NULL);
-            CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 190, 420, 80, 30, hWnd, (HMENU)IDCANCEL, NULL,NULL);
+            // --- UA 设置 ---
+            y += 40;
+            CreateWindowW(L"STATIC", L"伪装平台:", WS_CHILD|WS_VISIBLE, 35, y+3, 60, 20, hWnd, NULL,NULL,NULL);
+            HWND hCombo = CreateWindowW(L"COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, 105, y, 300, 200, hWnd, (HMENU)ID_COMBO_PLATFORM, NULL, NULL);
+            
+            y += 30;
+            HWND hEditUA = CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL, 35, y, 370, 25, hWnd, (HMENU)ID_EDIT_UA_STR, NULL, NULL);
+
+            // 按钮区域
+            y += 50;
+            CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 100, y, 100, 32, hWnd, (HMENU)IDOK, NULL,NULL);
+            CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 240, y, 100, 32, hWnd, (HMENU)IDCANCEL, NULL,NULL);
 
             // 初始化控件值
             SendMessage(hChk1, BM_SETCHECK, g_enableChromeCiphers ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -248,14 +253,14 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 if (idx >= 0 && idx < 5) SetDlgItemTextA(hWnd, ID_EDIT_UA_STR, UA_TEMPLATES[idx]);
             }
             if (LOWORD(wParam) == IDOK) {
-                // 保存邏輯
+                // 保存逻辑
                 int fMin = GetDlgItemInt(hWnd, ID_EDIT_FRAG_MIN, NULL, FALSE);
                 int fMax = GetDlgItemInt(hWnd, ID_EDIT_FRAG_MAX, NULL, FALSE);
                 int fDly = GetDlgItemInt(hWnd, ID_EDIT_FRAG_DLY, NULL, FALSE);
                 int pMin = GetDlgItemInt(hWnd, ID_EDIT_PAD_MIN, NULL, FALSE);
                 int pMax = GetDlgItemInt(hWnd, ID_EDIT_PAD_MAX, NULL, FALSE);
                 
-                // 簡單的校驗
+                // 简单的校验
                 if (fMin < 1) fMin = 1; if (fMax < fMin) fMax = fMin;
                 if (pMin < 0) pMin = 0; if (pMax < pMin) pMax = pMin;
 
@@ -270,7 +275,7 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 g_uaPlatformIndex = SendMessage(GetDlgItem(hWnd, ID_COMBO_PLATFORM), CB_GETCURSEL, 0, 0);
                 GetDlgItemTextA(hWnd, ID_EDIT_UA_STR, g_userAgentStr, 511);
 
-                // 更新熱鍵
+                // 更新热键
                 LRESULT res = SendMessage(hHotkey, HKM_GETHOTKEY, 0, 0);
                 UINT vk = LOBYTE(res); UINT mod = HIBYTE(res);
                 UINT newMod = 0; if (mod & HOTKEYF_SHIFT) newMod |= MOD_SHIFT;
@@ -290,25 +295,34 @@ LRESULT CALLBACK SettingsWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             } else if (LOWORD(wParam) == IDCANCEL) DestroyWindow(hWnd);
             break;
         case WM_CLOSE: DestroyWindow(hWnd); break;
+        case WM_DESTROY: hSettingsWnd = NULL; break; // 窗口销毁时重置句柄
     }
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
 void OpenSettingsWindow() {
+    // 检查是否已存在窗口，存在则前置
+    if (hSettingsWnd && IsWindow(hSettingsWnd)) {
+        ShowWindow(hSettingsWnd, SW_RESTORE);
+        SetForegroundWindow(hSettingsWnd);
+        return;
+    }
+
     WNDCLASSW wc = {0}; wc.lpfnWndProc=SettingsWndProc; wc.hInstance=GetModuleHandle(NULL); wc.lpszClassName=L"Settings"; wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);
     WNDCLASSW temp; if (!GetClassInfoW(GetModuleHandle(NULL), L"Settings", &temp)) RegisterClassW(&wc);
-    HWND h = CreateWindowW(L"Settings", L"程式設置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT,0,350,500, hwnd,NULL,wc.hInstance,NULL);
-    ShowWindow(h, SW_SHOW);
+    // 宽度调整为 460，高度 550
+    hSettingsWnd = CreateWindowW(L"Settings", L"软件设置", WS_VISIBLE|WS_CAPTION|WS_SYSMENU, CW_USEDEFAULT,0,460,550, hwnd,NULL,wc.hInstance,NULL);
+    ShowWindow(hSettingsWnd, SW_SHOW);
 }
 
 LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static HWND hList;
     switch(msg) {
         case WM_CREATE:
-            hList = CreateWindowW(L"LISTBOX", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY|LBS_EXTENDEDSEL, 10, 10, 360, 170, hWnd, (HMENU)ID_NODEMGR_LIST, NULL, NULL);
+            hList = CreateWindowW(L"LISTBOX", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|WS_VSCROLL|LBS_NOTIFY|LBS_EXTENDEDSEL, 10, 10, 410, 170, hWnd, (HMENU)ID_NODEMGR_LIST, NULL, NULL);
             g_oldListBoxProc = (WNDPROC)SetWindowLongPtr(hList, GWLP_WNDPROC, (LONG_PTR)ListBox_Proc);
-            CreateWindowW(L"BUTTON", L"編輯選中節點", WS_CHILD | WS_VISIBLE, 10, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_EDIT, NULL, NULL);
-            CreateWindowW(L"BUTTON", L"刪除選中節點", WS_CHILD | WS_VISIBLE, 140, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_DEL, NULL, NULL);
+            CreateWindowW(L"BUTTON", L"编辑选中节点", WS_CHILD | WS_VISIBLE, 10, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_EDIT, NULL, NULL);
+            CreateWindowW(L"BUTTON", L"删除选中节点", WS_CHILD | WS_VISIBLE, 140, 185, 120, 30, hWnd, (HMENU)ID_NODEMGR_DEL, NULL, NULL);
             EnumChildWindows(hWnd, (WNDENUMPROC)(void*)SendMessageW, (LPARAM)hAppFont);
             SendMessage(hWnd, WM_SETFONT, (WPARAM)hAppFont, TRUE);
             SendMessage(hWnd, WM_REFRESH_NODELIST, 0, 0); 
@@ -322,7 +336,7 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (LOWORD(wParam) == ID_NODEMGR_EDIT) {
                 int selCount = SendMessage(hList, LB_GETSELCOUNT, 0, 0);
                 if (selCount <= 0) {
-                    MessageBoxW(hWnd, L"請先選擇一個需要編輯的節點！", L"提示", MB_OK|MB_ICONWARNING);
+                    MessageBoxW(hWnd, L"请先选择一个需要编辑的节点！", L"提示", MB_OK|MB_ICONWARNING);
                     break;
                 }
                 int selIndex = 0;
@@ -337,9 +351,9 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             else if (LOWORD(wParam) == ID_NODEMGR_DEL) {
                 int selCount = SendMessage(hList, LB_GETSELCOUNT, 0, 0);
-                if (selCount <= 0) { MessageBoxW(hWnd, L"請先選擇至少一個節點", L"提示", MB_OK); break; }
-                wchar_t confirmMsg[64]; wsprintfW(confirmMsg, L"確定要刪除選中的 %d 個節點嗎？", selCount);
-                if (MessageBoxW(hWnd, confirmMsg, L"確認刪除", MB_YESNO | MB_ICONQUESTION) != IDYES) break;
+                if (selCount <= 0) { MessageBoxW(hWnd, L"请先选择至少一个节点", L"提示", MB_OK); break; }
+                wchar_t confirmMsg[64]; wsprintfW(confirmMsg, L"确定要删除选中的 %d 个节点吗？", selCount);
+                if (MessageBoxW(hWnd, confirmMsg, L"确认删除", MB_YESNO | MB_ICONQUESTION) != IDYES) break;
                 int* selIndices = (int*)malloc(selCount * sizeof(int));
                 if (!selIndices) break;
                 SendMessage(hList, LB_GETSELITEMS, (WPARAM)selCount, (LPARAM)selIndices);
@@ -351,7 +365,7 @@ LRESULT CALLBACK NodeMgrWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 }
                 for (int i = 0; i < selCount; i++) { DeleteNode(tagsToDelete[i]); free(tagsToDelete[i]); }
                 free(tagsToDelete); free(selIndices);
-                SendMessage(hWnd, WM_REFRESH_NODELIST, 0, 0); MessageBoxW(hWnd, L"刪除完成", L"提示", MB_OK);
+                SendMessage(hWnd, WM_REFRESH_NODELIST, 0, 0); MessageBoxW(hWnd, L"删除完成", L"提示", MB_OK);
             }
             break;
         case WM_SHOWWINDOW: if ((BOOL)wParam == TRUE) SendMessage(hWnd, WM_REFRESH_NODELIST, 0, 0); break;
@@ -369,7 +383,7 @@ void OpenNodeManager() {
         wc.lpfnWndProc = NodeMgrWndProc; wc.hInstance = GetModuleHandle(NULL); wc.lpszClassName = L"NodeMgr"; wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE+1);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW); RegisterClassW(&wc);
     }
-    hMgr = CreateWindowW(L"NodeMgr", L"節點管理 (支持 Ctrl+A 全選/多選)", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, 0, 400, 270, NULL, NULL, GetModuleHandle(NULL), NULL);
+    hMgr = CreateWindowW(L"NodeMgr", L"节点管理 (支持 Ctrl+A 全选/多选)", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, CW_USEDEFAULT, 0, 450, 270, NULL, NULL, GetModuleHandle(NULL), NULL);
     ShowWindow(hMgr, SW_SHOW);
 }
 
@@ -381,44 +395,44 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             #define CREATE_LABEL(txt) CreateWindowW(L"STATIC", txt, WS_CHILD|WS_VISIBLE, x, y, w_lbl, h, hWnd, NULL, NULL, NULL)
             #define CREATE_EDIT(id, styles) CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|styles, x+w_lbl, y-2, w_edit, h+4, hWnd, (HMENU)id, NULL, NULL)
             #define CREATE_COMBO(id) CreateWindowW(L"COMBOBOX", NULL, WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, x+w_lbl, y-2, 140, 200, hWnd, (HMENU)id, NULL, NULL)
-            CREATE_LABEL(L"別名 (Tag):");
+            CREATE_LABEL(L"节点备注:");
             CREATE_EDIT(ID_EDIT_TAG, ES_AUTOHSCROLL);
             y += gap;
-            CREATE_LABEL(L"地址 (Address):");
+            CREATE_LABEL(L"服务器地址:");
             CREATE_EDIT(ID_EDIT_ADDR, ES_AUTOHSCROLL);
             y += gap;
-            CREATE_LABEL(L"端口 (Port):");
+            CREATE_LABEL(L"服务器端口:");
             CreateWindowW(L"EDIT", NULL, WS_CHILD|WS_VISIBLE|WS_BORDER|ES_NUMBER, x+w_lbl, y-2, 80, h+4, hWnd, (HMENU)ID_EDIT_PORT, NULL, NULL);
             y += gap + 10;
-            CreateWindowW(L"STATIC", L"用戶驗證 (Auth)", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
+            CreateWindowW(L"STATIC", L"认证信息", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
             y += 25;
-            CREATE_LABEL(L"User/UUID:");
+            CREATE_LABEL(L"用户/UUID:");
             CREATE_EDIT(ID_EDIT_USER, ES_AUTOHSCROLL);
             y += gap;
-            CREATE_LABEL(L"密碼 (Pass):");
+            CREATE_LABEL(L"连接密码:");
             CREATE_EDIT(ID_EDIT_PASS, ES_AUTOHSCROLL);
             y += gap + 10;
-            CreateWindowW(L"STATIC", L"底層傳輸 (Transport)", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
+            CreateWindowW(L"STATIC", L"传输配置", WS_CHILD|WS_VISIBLE|SS_GRAYFRAME, x, y+5, 420, 1, hWnd, NULL, NULL, NULL);
             y += 25;
-            CREATE_LABEL(L"傳輸協議:");
+            CREATE_LABEL(L"传输协议:");
             HWND hNet = CREATE_COMBO(ID_EDIT_NET);
             AddComboItem(hNet, L"tcp", TRUE); AddComboItem(hNet, L"ws", FALSE);
             y += gap;
-            CREATE_LABEL(L"偽裝類型:");
+            CREATE_LABEL(L"伪装类型:");
             HWND hType = CREATE_COMBO(ID_EDIT_TYPE);
             AddComboItem(hType, L"none", TRUE);
             y += gap;
-            CREATE_LABEL(L"偽裝域名 (Host):");
+            CREATE_LABEL(L"伪装域名:");
             CREATE_EDIT(ID_EDIT_HOST, ES_AUTOHSCROLL);
             y += gap;
-            CREATE_LABEL(L"路徑 (Path):");
+            CREATE_LABEL(L"请求路径:");
             CREATE_EDIT(ID_EDIT_PATH, ES_AUTOHSCROLL);
             y += gap;
-            CREATE_LABEL(L"傳輸安全 (TLS):");
+            CREATE_LABEL(L"传输安全:");
             HWND hTls = CREATE_COMBO(ID_EDIT_TLS);
             AddComboItem(hTls, L"none", TRUE); AddComboItem(hTls, L"tls", FALSE);
             y += gap + 30;
-            CreateWindowW(L"BUTTON", L"確定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 120, y, 100, 32, hWnd, (HMENU)IDOK, NULL, NULL);
+            CreateWindowW(L"BUTTON", L"确定", WS_CHILD|WS_VISIBLE|BS_DEFPUSHBUTTON, 120, y, 100, 32, hWnd, (HMENU)IDOK, NULL, NULL);
             CreateWindowW(L"BUTTON", L"取消", WS_CHILD|WS_VISIBLE, 260, y, 100, 32, hWnd, (HMENU)IDCANCEL, NULL, NULL);
             y += 80; 
             g_nEditContentHeight = y; 
@@ -488,7 +502,7 @@ LRESULT CALLBACK NodeEditWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_COMMAND:
             if (LOWORD(wParam) == IDOK) {
                 SaveEditedNode(hWnd);
-                MessageBoxW(hWnd, L"節點已更新", L"成功", MB_OK);
+                MessageBoxW(hWnd, L"节点配置已更新", L"操作成功", MB_OK);
                 DestroyWindow(hWnd);
                 HWND hMgr = FindWindowW(L"NodeMgr", NULL);
                 if (hMgr) SendMessage(hMgr, WM_REFRESH_NODELIST, 0, 0);
@@ -507,7 +521,7 @@ void OpenNodeEditWindow(const wchar_t* tag) {
         wc.lpfnWndProc = NodeEditWndProc; wc.hInstance = GetModuleHandle(NULL); wc.lpszClassName = L"NodeEdit"; wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE+1);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW); RegisterClassW(&wc);
     }
-    HWND h = CreateWindowW(L"NodeEdit", L"配置節點", WS_VISIBLE|WS_CAPTION|WS_SYSMENU|WS_VSCROLL|WS_THICKFRAME|WS_MINIMIZEBOX, CW_USEDEFAULT, 0, 500, 720, NULL, NULL, GetModuleHandle(NULL), NULL);
+    HWND h = CreateWindowW(L"NodeEdit", L"配置节点", WS_VISIBLE|WS_CAPTION|WS_SYSMENU|WS_VSCROLL|WS_THICKFRAME|WS_MINIMIZEBOX, CW_USEDEFAULT, 0, 500, 720, NULL, NULL, GetModuleHandle(NULL), NULL);
     if(h) { ShowWindow(h, SW_SHOW); UpdateWindow(h); }
 }
 
@@ -538,7 +552,7 @@ void OpenLogViewer(BOOL bShow) {
     if (!GetClassInfoW(GetModuleHandle(NULL), L"LogWnd", &wc)) {
         wc.lpfnWndProc = LogWndProc; wc.hInstance = GetModuleHandle(NULL); wc.lpszClassName = L"LogWnd"; RegisterClassW(&wc);
     }
-    hLogViewerWnd = CreateWindowW(L"LogWnd", L"運行日誌", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,0,600,400, NULL,NULL,GetModuleHandle(NULL),NULL);
+    hLogViewerWnd = CreateWindowW(L"LogWnd", L"运行日志", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,0,600,400, NULL,NULL,GetModuleHandle(NULL),NULL);
     if (bShow) ShowWindow(hLogViewerWnd, SW_SHOW); else ShowWindow(hLogViewerWnd, SW_HIDE);
 }
 
@@ -547,27 +561,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         POINT pt; GetCursorPos(&pt); SetForegroundWindow(hWnd);
         ParseTags();
         if (hMenu) DestroyMenu(hMenu); hMenu = CreatePopupMenu(); hNodeSubMenu = CreatePopupMenu();
-        if (nodeCount == 0) AppendMenuW(hNodeSubMenu, MF_STRING|MF_GRAYED, 0, L"(無節點)");
+        if (nodeCount == 0) AppendMenuW(hNodeSubMenu, MF_STRING|MF_GRAYED, 0, L"(无节点)");
         else {
             for(int i=0; i<nodeCount; i++) {
                 UINT f = MF_STRING; if(wcscmp(nodeTags[i], currentNode)==0) f|=MF_CHECKED;
                 AppendMenuW(hNodeSubMenu, f, ID_TRAY_NODE_BASE+i, nodeTags[i]);
             }
         }
-        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hNodeSubMenu, L"切換節點");
-        AppendMenuW(hMenu, MF_STRING, ID_TRAY_MANAGE_NODES, L"節點管理");
-        AppendMenuW(hMenu, MF_STRING, ID_TRAY_IMPORT_CLIPBOARD, L"剪貼板導入 ");
+        AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hNodeSubMenu, L"切换节点");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_MANAGE_NODES, L"节点管理");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_IMPORT_CLIPBOARD, L"从剪贴板导入");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
         UINT proxyFlags = MF_STRING;
         if (IsSystemProxyEnabled()) proxyFlags |= MF_CHECKED;
-        AppendMenuW(hMenu, proxyFlags, ID_TRAY_SYSTEM_PROXY, L"系統代理");
-        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"程式設置");
-        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW_CONSOLE, L"查看日誌");
-        AppendMenuW(hMenu, IsAutorun()?MF_CHECKED:MF_UNCHECKED, ID_TRAY_AUTORUN, L"開機自啟");
-        if (g_isIconVisible) AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"隱藏圖標");
-        else AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"顯示圖標");
+        AppendMenuW(hMenu, proxyFlags, ID_TRAY_SYSTEM_PROXY, L"系统代理");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"软件设置");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW_CONSOLE, L"查看日志");
+        AppendMenuW(hMenu, IsAutorun()?MF_CHECKED:MF_UNCHECKED, ID_TRAY_AUTORUN, L"开机自动启动");
+        if (g_isIconVisible) AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"隐藏图标");
+        else AppendMenuW(hMenu, MF_STRING, ID_TRAY_HIDE_ICON, L"显示图标");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-        AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出程式");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出程序");
         TrackPopupMenu(hMenu, TPM_RIGHTALIGN|TPM_BOTTOMALIGN, pt.x, pt.y, 0, hWnd, NULL);
     }
     else if (msg == WM_COMMAND) {
@@ -591,12 +605,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int count = ImportFromClipboard(); 
             if (count > 0) {
                 ParseTags();
-                HWND hMgr = FindWindowW(L"NodeMgr", L"節點管理 (支持 Ctrl+A 全選/多選)");
+                HWND hMgr = FindWindowW(L"NodeMgr", L"节点管理 (支持 Ctrl+A 全选/多选)");
                 if (hMgr && IsWindow(hMgr)) SendMessage(hMgr, WM_REFRESH_NODELIST, 0, 0);
-                wchar_t msgBuf[128]; wsprintfW(msgBuf, L"成功導入 %d 個節點！", count);
-                MessageBoxW(hWnd, msgBuf, L"導入成功", MB_OK|MB_ICONINFORMATION);
+                wchar_t msgBuf[128]; wsprintfW(msgBuf, L"成功导入 %d 个节点！", count);
+                MessageBoxW(hWnd, msgBuf, L"导入成功", MB_OK|MB_ICONINFORMATION);
                 if (wcslen(currentNode) == 0 && nodeCount > 0) SwitchNode(nodeTags[0]);
-            } else MessageBoxW(hWnd, L"剪貼板中未發現支持的鏈接 (vmess/vless/ss/trojan)", L"導入失敗", MB_OK|MB_ICONWARNING);
+            } else MessageBoxW(hWnd, L"剪贴板中未发现支持的链接 (vmess/vless/ss/trojan)", L"导入失败", MB_OK|MB_ICONWARNING);
         }
         else if (id >= ID_TRAY_NODE_BASE && id < ID_TRAY_NODE_BASE + 1000) {
             int idx = id - ID_TRAY_NODE_BASE;
@@ -608,7 +622,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nShow) {
-    srand((unsigned)time(NULL)); // 初始化隨機數種子
+    srand((unsigned)time(NULL)); // 初始化随机数种子
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     INITCOMMONCONTROLSEX ic = {sizeof(INITCOMMONCONTROLSEX), ICC_HOTKEY_CLASS}; InitCommonControlsEx(&ic);
     
