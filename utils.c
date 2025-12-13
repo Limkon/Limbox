@@ -7,6 +7,28 @@
 #pragma comment(lib, "wininet.lib")
 #endif
 
+// --- 修复编译错误：补充缺失的宏定义 ---
+#ifndef INTERNET_OPTION_SECURE_PROTOCOLS
+#define INTERNET_OPTION_SECURE_PROTOCOLS 136
+#endif
+
+// TLS 协议版本掩码 (部分老版本头文件缺失)
+#ifndef SP_PROT_TLS1_2_CLIENT
+#define SP_PROT_TLS1_2_CLIENT 0x00000800
+#endif
+#ifndef SP_PROT_TLS1_3_CLIENT
+#define SP_PROT_TLS1_3_CLIENT 0x00002000
+#endif
+
+// 证书忽略标志
+#ifndef INTERNET_FLAG_IGNORE_CERT_CN_INVALID
+#define INTERNET_FLAG_IGNORE_CERT_CN_INVALID 0x00001000
+#endif
+#ifndef INTERNET_FLAG_IGNORE_CERT_DATE_INVALID
+#define INTERNET_FLAG_IGNORE_CERT_DATE_INVALID 0x00002000
+#endif
+// ------------------------------------
+
 static const unsigned char base64_table[256] = {
     0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
     0,0,0,0,0,0,0,0,0,0,0,62,0,0,0,63,52,53,54,55,56,57,58,59,60,61,0,0,0,0,0,0,
@@ -143,9 +165,6 @@ char* GetQueryParam(const char* query, const char* key) {
 }
 
 // --- 增强版：HTTP 下载功能 ---
-// 针对 Error 12157 (Security Channel Error) 进行了修复：
-// 1. 显式开启 TLS 1.1 / 1.2 / 1.3
-// 2. 忽略证书吊销错误 (Revocation) 和未知 CA 错误
 char* Utils_HttpGet(const char* url) {
     if (!url) return NULL;
     
@@ -158,34 +177,28 @@ char* Utils_HttpGet(const char* url) {
         return NULL;
     }
 
-    // --- 修复 12157: 显式启用 TLS 1.2 和 1.3 ---
-    // 0x00000800 = TLS 1.2, 0x00002000 = TLS 1.3 (Win11/Server 2022)
-    // 0x00000080 = TLS 1.1, 0x00000020 = TLS 1.0 (兼容旧版，但通常不推荐)
-    // 我们开启尽可能多的安全协议
-    DWORD secure_protocols = 0x00000800 | 0x00002000 | 0x00000080 | 0x00000020; 
+    // 显式启用 TLS 1.2 和 1.3 (修复 error 12157)
+    // 兼容性定义：SP_PROT_TLS1_2_CLIENT (0x800) | SP_PROT_TLS1_3_CLIENT (0x2000)
+    DWORD secure_protocols = SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT | 0x00000080; // + TLS 1.1
     InternetSetOption(hInternet, INTERNET_OPTION_SECURE_PROTOCOLS, &secure_protocols, sizeof(secure_protocols));
 
-    // --- 设置超时 ---
-    DWORD timeout = 30000; // 30秒超时
+    // 设置 30 秒超时
+    DWORD timeout = 30000;
     InternetSetOption(hInternet, INTERNET_OPTION_CONNECT_TIMEOUT, &timeout, sizeof(timeout));
     InternetSetOption(hInternet, INTERNET_OPTION_RECEIVE_TIMEOUT, &timeout, sizeof(timeout));
     InternetSetOption(hInternet, INTERNET_OPTION_SEND_TIMEOUT, &timeout, sizeof(timeout));
 
-    // --- 组合标志: 忽略各种证书错误 ---
+    // 忽略证书错误标志
     DWORD flags = INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE | INTERNET_FLAG_PRAGMA_NOCACHE | 
                   INTERNET_FLAG_SECURE | 
                   INTERNET_FLAG_IGNORE_CERT_CN_INVALID | 
                   INTERNET_FLAG_IGNORE_CERT_DATE_INVALID |
-                  0x00002000; // 0x00002000 是 INTERNET_FLAG_IGNORE_CERT_DATA_INVALID 的值
+                  0x00002000; // INTERNET_FLAG_IGNORE_CERT_DATA_INVALID
 
     HINTERNET hConnect = InternetOpenUrlA(hInternet, url, NULL, 0, flags, 0);
     
     if (!hConnect) {
-        DWORD err = GetLastError();
-        log_msg("[Utils] Download failed for %s. Error Code: %d", url, err);
-        
-        // 如果是 12157，尝试禁用吊销检查再试一次 (虽然 OpenUrl flag 很难直接控制，但可尝试)
-        // 这里的 flags 已经包含了主要的忽略项。如果仍然失败，通常是系统根证书太旧或协议被系统策略禁用。
+        log_msg("[Utils] Download failed for %s. Error Code: %d", url, GetLastError());
         InternetCloseHandle(hInternet);
         return NULL;
     }
@@ -204,7 +217,6 @@ char* Utils_HttpGet(const char* url) {
     
     while (InternetReadFile(hConnect, buffer + totalRead, 8192, &bytesRead) && bytesRead > 0) {
         totalRead += bytesRead;
-        // 动态扩容
         if (totalRead + 8192 >= bufferSize) {
             bufferSize *= 2;
             char* newBuf = (char*)realloc(buffer, bufferSize);
@@ -212,7 +224,6 @@ char* Utils_HttpGet(const char* url) {
                 free(buffer);
                 InternetCloseHandle(hConnect);
                 InternetCloseHandle(hInternet);
-                log_msg("[Utils] Memory allocation failed.");
                 return NULL;
             }
             buffer = newBuf;
@@ -280,7 +291,6 @@ void SetSystemProxy(BOOL enable) {
         }
         list.dwSize = sizeof(list);
         list.pszConnection = NULL;
-        list.dwOptionCount = 3;
         list.dwOptionCount = 3;
         list.dwOptionError = 0;
         list.pOptions = options;
